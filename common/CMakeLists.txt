@@ -122,6 +122,7 @@ set( KICOMMON_SRCS
     git/git_transfer_busy.cpp
     git/kicad_git_common.cpp
     git/kicad_git_errors.cpp
+    git/kigit_author.cpp
     git/text_diff.cpp
     git/git_backend.cpp
     git/kigit_orphan_registry.cpp
@@ -283,6 +284,7 @@ set( KICOMMON_SRCS
     widgets/html_window.cpp
     widgets/indicator_icon.cpp
     widgets/kistatusbar.cpp
+    widgets/kistatusbar_popup.cpp
     widgets/number_badge.cpp
     widgets/progress_reporter_base.cpp
     widgets/report_severity.cpp

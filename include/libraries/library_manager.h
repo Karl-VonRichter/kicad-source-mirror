@@ -444,6 +444,9 @@ public:
 
     void ReloadTables( LIBRARY_TABLE_SCOPE aScope, std::initializer_list<LIBRARY_TABLE_TYPE> aTablesToLoad = {} );
 
+    /// Reload the global or project table of a type if its file appeared, changed or vanished since it was loaded
+    void ReloadChangedTables( LIBRARY_TABLE_TYPE aType );
+
     /// Notify all adapters that the project has changed
     void ProjectChanged();
 
@@ -573,6 +576,11 @@ private:
                      std::vector<LIBRARY_TABLE_TYPE> aTablesToLoad = {} );
 
     void loadNestedTables( LIBRARY_TABLE& aTable );
+
+    /// Loads the global tables without the PCM maintenance that LoadGlobalTables() adds, which can save them
+    void loadGlobalTables( std::initializer_list<LIBRARY_TABLE_TYPE> aTablesToLoad );
+
+    void maintainPcmLibraries();
 
     /// Applies user overrides (disabled/hidden) to rows of a read-only nested table
     void applyLibOverrides( LIBRARY_TABLE& aTable );

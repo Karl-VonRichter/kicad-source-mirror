@@ -473,6 +473,9 @@ int PCB_EDIT_FRAME::inferLegacyEdgeClearance( BOARD* aBoard, bool aShowUserMsg )
 
 bool PCB_EDIT_FRAME::ReloadFromDisk()
 {
+    if( IsClosing() )
+        return false;
+
     wxString fileName = GetBoard()->GetFileName();
 
     if( fileName.IsEmpty() )
@@ -630,7 +633,7 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     // Crash-recovery: when zip-format autosave is active, look for autosave files newer than
     // the saved board and offer to recover them before the load happens.
     if( !is_new )
-        CheckForAutosaveFiles( wx_filename.GetPath(), { FILEEXT::KiCadPcbFileExtension } );
+        CheckForAutosaveFiles( wx_filename.GetPath(), { FILEEXT::KiCadPcbFileExtension }, aCtl );
 
     // custom rules the importer derived, saved with the board once its name is known
     wxString importedRules;
@@ -648,6 +651,7 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     {
         BOARD* loadedBoard = nullptr;   // it will be set to non-NULL if loaded OK
         bool   failedLoad = false;
+        std::map<PCB_LAYER_ID, wxString> renamedLayers;
 
         // importer template footprints, captured at load for reconciliation
         std::vector<std::unique_ptr<FOOTPRINT>> importedLibFootprints;
@@ -703,10 +707,10 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                             if( !ADVANCED_CFG::GetCfg().m_ImportSkipLayerMapping )
                             {
                                 const auto layerMapCallback =
-                                        [this]( const std::vector<INPUT_LAYER_DESC>& aLayers )
-                                        {
-                                            return DIALOG_MAP_LAYERS::RunModal( this, aLayers );
-                                        };
+                                        [this, &renamedLayers]( const std::vector<INPUT_LAYER_DESC>& aLayers )
+                                {
+                                    return DIALOG_MAP_LAYERS::RunModal( this, aLayers, &renamedLayers );
+                                };
 
                                 mappable_pi->RegisterCallback( layerMapCallback );
                             }
@@ -806,6 +810,33 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
             for( PCB_LAYER_ID layer : loadedBoard->GetEnabledLayers().Seq() )
                 loadedBoard->SetLayerName( layer, wxEmptyString );
         }
+        else
+        {
+            for( const auto& [layer, name] : renamedLayers )
+                loadedBoard->SetLayerName( layer, name );
+        }
+
+        if( converted && !renamedLayers.empty() && !GetPcbNewSettings()->m_ImportKeepKiCadLayerNames )
+        {
+            for( const auto& [renamedLayer, name] : renamedLayers )
+            {
+                if( !loadedBoard->IsLayerEnabled( renamedLayer ) )
+                    continue;
+
+                for( PCB_LAYER_ID layer : loadedBoard->GetEnabledLayers() )
+                {
+                    if( layer == renamedLayer || loadedBoard->GetLayerName( layer ) != name )
+                        continue;
+
+                    progressReporter.Hide();
+                    DisplayErrorMessage( this, _( "Duplicate imported layer name" ),
+                                         wxString::Format( _( "Layer name '%s' is already in use." ), name ) );
+                    delete loadedBoard;
+                    Clear_Pcb( false );
+                    return false;
+                }
+            }
+        }
 
         // This fixes a focus issue after the progress reporter is done on GTK.  It shouldn't
         // cause any issues on macOS and Windows.  If it does, it will have to be conditionally
@@ -894,6 +925,18 @@ bool PCB_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         {
             m_infoBar->RemoveAllButtons();
             m_infoBar->AddCloseButton();
+
+            if( pluginType == PCB_IO_MGR::KICAD_SEXP && Pgm().GetCommonSettings()->m_Git.enableGit
+                && !Prj().IsNullProject() && Prj().AttachGitRepository() )
+            {
+                // Saving an unmodified board still writes it in the current format
+                m_infoBar->AddLink( _( "Upgrade Format Now" ),
+                                    [this]( wxHyperlinkEvent& )
+                                    {
+                                        CallAfter( [this]() { SaveBoard(); } );
+                                    } );
+            }
+
             m_infoBar->ShowMessage( _( "This file was created by an older version of KiCad. "
                                        "It will be converted to the new format when saved." ),
                                     wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
