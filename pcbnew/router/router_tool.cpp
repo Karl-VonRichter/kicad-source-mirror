@@ -3105,7 +3105,7 @@ static DRAG_KIND dragKindOf( const PCB_SELECTION& aSelection )
 }
 
 
-bool ROUTER_TOOL::CanInlineDrag( int aDragMode )
+bool ROUTER_TOOL::CanInlineDrag()
 {
     m_toolMgr->RunAction<CLIENT_SELECTION_FILTER>( ACTIONS::selectionCursor, NeighboringSegmentFilter );
     const PCB_SELECTION& selection = m_toolMgr->GetTool<PCB_SELECTION_TOOL>()->GetSelection();
@@ -3120,10 +3120,8 @@ bool ROUTER_TOOL::CanInlineDrag( int aDragMode )
     case DRAG_KIND::TRACKS_KIND:
         return true;
 
-    // Neither footprints nor a block drag free angle
     case DRAG_KIND::FOOTPRINTS_KIND:
-    case DRAG_KIND::BLOCK:
-        return !( aDragMode & PNS::DM_FREE_ANGLE );
+    case DRAG_KIND::BLOCK: return true;
 
     default:
         return false;
@@ -3237,16 +3235,18 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     // a Move operation). Sync it now so that FindItemByParent and joint lookups work correctly.
     m_router->SyncWorld();
 
-    // A footprint with no copper the router can see cannot be dragged, and showing it in the
-    // preview would promise a move the commit will not make
-    for( auto it = footprints.begin(); it != footprints.end(); )
+    // The router moves a footprint through its pads, so one with none it can see is carried here
+    std::vector<FOOTPRINT*> carriedFootprints;
+
+    for( FOOTPRINT* footprint : footprints )
     {
         bool hasSolid = false;
 
-        for( PAD* pad : ( *it )->Pads() )
+        for( PAD* pad : footprint->Pads() )
             hasSolid |= !m_router->GetWorld()->FindItemsByParent( pad ).empty();
 
-        it = hasSolid ? std::next( it ) : footprints.erase( it );
+        if( !hasSolid )
+            carriedFootprints.push_back( footprint );
     }
 
     // Snapping uses ViewGetLOD(), which uses the layerVisibilityCache.  Make sure it's up-to-date.
@@ -3254,8 +3254,9 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
     if( !footprints.empty() )
     {
-        // A block drag has its own algorithm, and the leader logic below assumes a lone footprint
-        if( footprints.size() == 1 && !blockDrag )
+        // A block drag has its own algorithm, and the leader logic below assumes a lone
+        // footprint the router can move
+        if( footprints.size() == 1 && !blockDrag && carriedFootprints.empty() )
             singleFootprintDrag = true;
 
         if( showCourtyardConflicts )
@@ -3442,6 +3443,7 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
         restoreSelection( selection );
         controls()->ForceCursorPosition( false );
         highlightNets( false );
+
         return 0;
     }
 
@@ -3486,6 +3488,7 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
 
     bool hasMouseMoved = false;
     bool hasMultidragCancelled = false;
+    bool committed = false;
 
     while( TOOL_EVENT* evt = Wait() )
     {
@@ -3610,7 +3613,7 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
             bool forceCommit = evt->Modifier( MD_CTRL );
 
             updateEndItem( *evt );
-            m_router->FixRoute( m_endSnapPoint, m_endItem, forceFinish, forceCommit );
+            committed = m_router->FixRoute( m_endSnapPoint, m_endItem, forceFinish, forceCommit );
             leaderSegments = m_router->GetLastCommittedLeaderSegments();
 
             break;
@@ -3685,6 +3688,20 @@ int ROUTER_TOOL::InlineDrag( const TOOL_EVENT& aEvent )
     if( m_router->RoutingInProgress() )
         m_router->StopRouting();
 
+    if( committed && !carriedFootprints.empty() && m_endSnapPoint != p )
+    {
+        BOARD_COMMIT commit( frame() );
+        VECTOR2I     offset = m_endSnapPoint - p;
+
+        for( FOOTPRINT* footprint : carriedFootprints )
+        {
+            commit.Modify( footprint );
+            footprint->Move( offset );
+        }
+
+        // Appending keeps the whole drag in one undo step
+        commit.Push( _( "Drag" ), APPEND_UNDO );
+    }
 
     if( itemsToDrag.Size() && hasMultidragCancelled )
     {

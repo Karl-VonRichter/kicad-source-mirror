@@ -1052,7 +1052,7 @@ bool EDIT_TOOL::invokeInlineRouter( int aDragMode )
     if( theRouter->IsToolActive() )
         return false;
 
-    if( theRouter->CanInlineDrag( aDragMode ) )
+    if( theRouter->CanInlineDrag() )
     {
         m_toolMgr->RunAction( PCB_ACTIONS::routerInlineDrag, aDragMode );
         return true;
@@ -1068,6 +1068,19 @@ bool EDIT_TOOL::isRouterActive() const
     ROUTER_TOOL* router = m_toolMgr->GetTool<ROUTER_TOOL>();
 
     return router && router->RoutingInProgress();
+}
+
+
+// The router drags a footprint by its pads, so a footprint with none gives it nothing to do
+static bool routerHasWork( const PCB_SELECTION& aSelection )
+{
+    for( EDA_ITEM* item : aSelection )
+    {
+        if( item->Type() != PCB_FOOTPRINT_T || !static_cast<FOOTPRINT*>( item )->Pads().empty() )
+            return true;
+    }
+
+    return false;
 }
 
 
@@ -1210,6 +1223,10 @@ int EDIT_TOOL::Drag( const TOOL_EVENT& aEvent )
 
     if( selection.Empty() )
         return 0;
+
+    // A drag with nothing to route is a move
+    if( !routerHasWork( selection ) )
+        return Move( aEvent );
 
     invokeInlineRouter( mode );
 
