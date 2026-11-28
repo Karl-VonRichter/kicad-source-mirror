@@ -1447,13 +1447,20 @@ bool LIBGIT_BACKEND::GetConfigString( git_repository* aRepo, const wxString& aKe
 bool LIBGIT_BACKEND::SetConfigString( git_repository* aRepo, const wxString& aKey, const wxString& aValue )
 {
     git_config* config = nullptr;
+    git_config* local = nullptr;
 
     if( !aRepo || git_repository_config( &config, aRepo ) != GIT_OK )
         return false;
 
     KIGIT::GitConfigPtr configPtr( config );
 
-    return git_config_set_string( config, aKey.utf8_string().c_str(), aValue.utf8_string().c_str() ) == GIT_OK;
+    // A write goes to the highest writable level, which need not be this repository's own
+    if( git_config_open_level( &local, config, GIT_CONFIG_LEVEL_LOCAL ) != GIT_OK )
+        return false;
+
+    KIGIT::GitConfigPtr localPtr( local );
+
+    return git_config_set_string( local, aKey.utf8_string().c_str(), aValue.utf8_string().c_str() ) == GIT_OK;
 }
 
 
@@ -3208,19 +3215,7 @@ bool LIBGIT_BACKEND::RemoveRemote( git_repository* aRepo, const wxString& aName 
 
 bool LIBGIT_BACKEND::SetUserConfig( git_repository* aRepo, const wxString& aName, const wxString& aEmail )
 {
-    if( !aRepo )
-        return false;
-
-    git_config* config = nullptr;
-
-    if( git_repository_config( &config, aRepo ) != GIT_OK )
-        return false;
-
-    KIGIT::GitConfigPtr configPtr( config );
-
-    bool ok = git_config_set_string( config, "user.name", aName.utf8_string().c_str() ) == GIT_OK;
-    ok = ok && git_config_set_string( config, "user.email", aEmail.utf8_string().c_str() ) == GIT_OK;
-    return ok;
+    return SetConfigString( aRepo, wxS( "user.name" ), aName ) && SetConfigString( aRepo, wxS( "user.email" ), aEmail );
 }
 
 

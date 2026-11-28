@@ -23,6 +23,7 @@
 #define SCH_IO_KICAD_SEXPR_LIB_CACHE_H_
 
 #include "sch_io/sch_io_lib_cache.h"
+#include <atomic>
 #include <set>
 
 class FILE_LINE_READER;
@@ -30,6 +31,7 @@ class SCH_PIN;
 class SCH_TEXT;
 class SCH_TEXTBOX;
 class LINE_READER;
+class PROGRESS_REPORTER;
 class SCH_IO_KICAD_SEXPR;
 
 /**
@@ -58,6 +60,9 @@ public:
     void SetFileFormatVersionAtLoad( int aVersion ) { m_fileFormatVersionAtLoad = aVersion; }
     int GetFileFormatVersionAtLoad()  const { return m_fileFormatVersionAtLoad; }
 
+    /// Open a library file of the current format, as every save of one starts it
+    static void FormatLibraryHeader( OUTPUTFORMATTER& aFormatter );
+
 private:
     friend SCH_IO_KICAD_SEXPR;
 
@@ -71,13 +76,17 @@ private:
      */
     void updateParentSymbolLinks();
 
-    void formatLibraryHeader( OUTPUTFORMATTER& aFormatter );
-
     bool isLibraryPathValid() const;
 
     int m_fileFormatVersionAtLoad;
 
     std::set<wxString> m_pendingFileDeletes;
+
+    /// The owning plugin's cancel flag, read between the files of a symbol folder
+    const std::atomic<bool>* m_loadCancelled = nullptr;
+
+    /// The owning plugin's progress reporter, polled per symbol during Load(), or null
+    PROGRESS_REPORTER* m_progressReporter = nullptr;
 
     static void saveSymbolDrawItem( SCH_ITEM* aItem, OUTPUTFORMATTER& aFormatter );
     static void saveField( SCH_FIELD* aField, OUTPUTFORMATTER& aFormatter );

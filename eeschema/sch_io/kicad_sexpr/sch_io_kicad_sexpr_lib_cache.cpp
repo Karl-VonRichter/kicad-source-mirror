@@ -94,6 +94,10 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
                  wxString::Format( wxT( "Cannot use relative file paths in sexpr plugin to open library '%s'." ),
                                    m_libFileName.GetFullPath() ) );
 
+    // Snapshot the file time before parsing, so a library that throws partway through still
+    // reloads once its file changes
+    m_fileModTime = GetLibModificationTime();
+
     if( !m_libFileName.IsDir() )
     {
         wxLogTrace( traceSchLegacyPlugin, "Loading sexpr symbol library file '%s'",
@@ -101,7 +105,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
 
         FILE_LINE_READER reader( m_libFileName.GetFullPath() );
 
-        SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
+        SCH_IO_KICAD_SEXPR_PARSER parser( &reader, m_progressReporter );
 
         parser.ParseLib( m_symbols );
 
@@ -148,6 +152,10 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
 
             do
             {
+                // A folder of thousands of files would otherwise hold up an abort, such as on quit
+                if( m_loadCancelled && m_loadCancelled->load() )
+                    THROW_IO_ERRORF( _( "Loading symbol library '%s' was cancelled." ), m_libFileName.GetPath() );
+
                 tmp.SetFullName( libFileName );
                 wxString sourceFilePath = tmp.GetFullPath();
 
@@ -162,7 +170,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
                 try
                 {
                     FILE_LINE_READER reader( sourceFilePath );
-                    SCH_IO_KICAD_SEXPR_PARSER parser( &reader );
+                    SCH_IO_KICAD_SEXPR_PARSER parser( &reader, m_progressReporter );
 
                     parser.ParseLib( m_symbols );
                     SetFileFormatVersionAtLoad( parser.GetParsedRequiredVersion() );
@@ -199,6 +207,10 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
                         errorCache += warning;
                     }
                 }
+                catch( const IO_CANCELLED& )
+                {
+                    throw;
+                }
                 catch( const IO_ERROR& ioe )
                 {
                     // Mark that we had a parse error - saving would lose symbols
@@ -222,10 +234,6 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Load()
         updateParentSymbolLinks();
         IncrementModifyHash();
     }
-
-    // Remember the file modification time of library file when the cache snapshot was made,
-    // so that in a networked environment we will reload the cache as needed.
-    m_fileModTime = GetLibModificationTime();
 }
 
 
@@ -257,7 +265,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Save( const std::optional<bool>& aOpt )
     {
         auto formatter = std::make_unique<PRETTIFIED_FILE_OUTPUTFORMATTER>( fn.GetFullPath() );
 
-        formatLibraryHeader( *formatter.get() );
+        FormatLibraryHeader( *formatter.get() );
 
         std::vector<LIB_SYMBOL*> orderedSymbols;
 
@@ -374,7 +382,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::Save( const std::optional<bool>& aOpt )
 
             auto formatter = std::make_unique<PRETTIFIED_FILE_OUTPUTFORMATTER>( oldFn.GetFullPath() );
 
-            formatLibraryHeader( *formatter.get() );
+            FormatLibraryHeader( *formatter.get() );
 
             for( LIB_SYMBOL* symbol : symbols )
                 SaveSymbol( symbol, *formatter.get() );
@@ -831,6 +839,12 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::savePin( SCH_PIN* aPin, OUTPUTFORMATTER& aFor
                       EDA_UNIT_UTILS::FormatInternalUnits( schIUScale, aPin->GetNumberTextSize() ).c_str(),
                       EDA_UNIT_UTILS::FormatInternalUnits( schIUScale, aPin->GetNumberTextSize() ).c_str() );
 
+    // Omitted at the default so symbols that never opted in keep byte-identical output
+    if( aPin->GetNumberDisplay() != PIN_NUMBER_DISPLAY::ALL )
+        aFormatter.Print( "(number_display %s)", getPinNumberDisplayToken( aPin->GetNumberDisplay() ) );
+
+    if( aPin->GetStackIconOnName() )
+        aFormatter.Print( "(stack_icon_on_name yes)" );
 
     for( const std::pair<const wxString, SCH_PIN::ALT>& alt : aPin->GetAlternates() )
     {
@@ -982,7 +996,7 @@ void SCH_IO_KICAD_SEXPR_LIB_CACHE::updateParentSymbolLinks()
 }
 
 
-void SCH_IO_KICAD_SEXPR_LIB_CACHE::formatLibraryHeader( OUTPUTFORMATTER& aFormatter )
+void SCH_IO_KICAD_SEXPR_LIB_CACHE::FormatLibraryHeader( OUTPUTFORMATTER& aFormatter )
 {
     aFormatter.Print( "(kicad_symbol_lib (version %d) (generator \"kicad_symbol_editor\") "
                       "(generator_version \"%s\")",

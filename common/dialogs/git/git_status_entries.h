@@ -102,6 +102,10 @@ enum class GIT_EDITOR_PREP
  */
 bool PrepareEditorsForGitOperation( EDA_BASE_FRAME* aFrame, GIT_EDITOR_PREP aPurpose, bool* aSavedEditors = nullptr );
 
+/// Save the schematic and board editors holding unsaved edits, and the project file, without asking. False when
+/// a save failed, which has been reported.
+bool SaveDocumentEditors( EDA_BASE_FRAME* aFrame );
+
 /// Unsaved schematic or board edits can be saved for a commit, even with no changes on disk.
 /// Library edits do not count. Call on the UI thread.
 bool DocumentEditorsDirty( KIWAY& aKiway );
@@ -236,8 +240,11 @@ struct GIT_FILE_SIDES
 {
     wxString             before; ///< Empty when the file did not exist on that side.
     wxString             after;
+    wxString             beforeRoot; ///< The tree each side's sheet references resolve within, when known.
+    wxString             afterRoot;
     KICAD_DIFF::DOC_KIND kind = KICAD_DIFF::DOC_KIND::UNKNOWN;
     wxString             error;  ///< Why the sides could not be written, when they could not.
+    bool                 tooLargeToPreview = false; ///< A drawing over the preview cap, decided on a worker.
 };
 
 /**

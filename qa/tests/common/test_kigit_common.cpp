@@ -30,6 +30,7 @@
 #include <git/project_git_utils.h>
 #include <git/git_branch_handler.h>
 #include <git/git_push_handler.h>
+#include <git/text_diff.h>
 #include <qa_utils/file_utils.h>
 #include <qa_utils/git_test_fixture.h>
 #include <pgm_base.h>
@@ -1306,6 +1307,23 @@ BOOST_AUTO_TEST_CASE( WriteBlobToFileExtractsCommittedContent )
 }
 
 
+// A board is written alone into the workspace, so its side is the workspace and a small one is previewed
+BOOST_AUTO_TEST_CASE( MaterializedBoardIsPreviewedWithinTheWorkspace )
+{
+    git_repository*         repo = makeRepoWithCommit( TempPath(), "board.kicad_pcb", "(kicad_pcb)\n" );
+    KIGIT::GitRepositoryPtr repoPtr( repo );
+    KIGIT_COMMON            common( repo );
+    GIT_DIFF_WORKSPACE      workspace;
+    GIT_FILE_SIDES          sides;
+
+    writeFile( TempPath(), "board.kicad_pcb", "(kicad_pcb (version 1))\n" );
+
+    BOOST_REQUIRE( MaterializeWorkingFile( common, workspace, wxS( "board.kicad_pcb" ), sides ) );
+    BOOST_CHECK( !KIGIT::DrawingTooLargeToPreview( sides.before, sides.after, false, sides.beforeRoot,
+                                                   sides.afterRoot ) );
+}
+
+
 BOOST_AUTO_TEST_CASE( DiffWorkspaceKeepsExtractionsSeparateAndRemovesThem )
 {
     KIGIT::GitRepositoryPtr repo( makeRepoWithCommit( TempPath(), "board.kicad_pcb", "board version\n" ) );
@@ -1325,6 +1343,7 @@ BOOST_AUTO_TEST_CASE( DiffWorkspaceKeepsExtractionsSeparateAndRemovesThem )
         root = workspace.Root();
         boardFile = workspace.Materialize( repo.get(), "HEAD", "board.kicad_pcb", KICAD_DIFF::DOC_KIND::PCB );
         BOOST_REQUIRE( !boardFile.IsEmpty() );
+        BOOST_CHECK_EQUAL( wxFileName( boardFile ).GetFullName(), wxS( "board.kicad_pcb" ) );
         BOOST_CHECK_EQUAL( readWorkingFile( wxFileName( boardFile ) ), "board version\n" );
 
         {
@@ -1601,6 +1620,27 @@ BOOST_AUTO_TEST_CASE( GitIdentityPrecedence )
     resolved = KIGIT::ResolveAuthor( preferences, GitUserConfig(), GitUserConfig() );
     BOOST_CHECK( !resolved.hasName );
     BOOST_CHECK( resolved.authorName.IsEmpty() );
+}
+
+
+// The preferences panel refills a default-mode author from git config, which must not restart every session
+BOOST_AUTO_TEST_CASE( DefaultAuthorRefillIsNoChange )
+{
+    COMMON_SETTINGS::GIT before{};
+    before.useDefaultAuthor = true;
+
+    COMMON_SETTINGS::GIT after = before;
+    after.authorName = wxS( "Host User" );
+    after.authorEmail = wxS( "host@example.com" );
+
+    BOOST_CHECK( !KIGIT::AuthorPreferenceChanged( before, after ) );
+
+    after.useDefaultAuthor = false;
+    BOOST_CHECK( KIGIT::AuthorPreferenceChanged( before, after ) );
+
+    before = after;
+    after.authorName = wxS( "Robert QA" );
+    BOOST_CHECK( KIGIT::AuthorPreferenceChanged( before, after ) );
 }
 
 
@@ -2699,8 +2739,9 @@ BOOST_AUTO_TEST_CASE( SwitchToBranchAtHeadKeepsUncommittedChanges )
     BOOST_REQUIRE( common.CreateBranch( "topic" ) );
 
     GIT_BRANCH_HANDLER handler( &common );
-    BOOST_REQUIRE_MESSAGE( handler.SwitchToBranch( wxS( "topic" ) ) == BranchResult::Success,
-                           handler.GetErrorString() );
+    const BranchResult result = handler.SwitchToBranch( wxS( "topic" ) );
+
+    BOOST_REQUIRE_MESSAGE( result == BranchResult::Success, handler.GetErrorString() );
 
     BOOST_CHECK_EQUAL( common.GetCurrentBranchName(), wxS( "topic" ) );
     BOOST_CHECK_EQUAL( readWorkingFile( wxFileName( TempPath(), "file.txt" ) ), "v2\n" );

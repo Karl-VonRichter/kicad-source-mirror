@@ -22,11 +22,60 @@
  */
 
 #include <diff_merge/kicad_differ.h>
+#include <ki_exception.h>
+#include <progress_reporter.h>
+
+#include <wx/filename.h>
+#include <wx/intl.h>
 
 
 namespace KICAD_DIFF
 {
 
 KICAD_DIFFER::~KICAD_DIFFER() = default;
+
+
+void ReportDiffProgress( KICAD_DIFFER& aDiffer, PROGRESS_REPORTER* aProgress )
+{
+    if( !aProgress )
+        return;
+
+    aProgress->AdvancePhase( _( "Comparing..." ) );
+
+    KICAD_DIFFER::OPTIONS options = aDiffer.GetOptions();
+
+    options.progress = [aProgress]( double aFraction )
+    {
+        aProgress->SetCurrentProgress( aFraction );
+
+        // Stops the pairing at once, which otherwise runs on for seconds after Cancel
+        if( !aProgress->KeepRefreshing() )
+            THROW_IO_CANCELLED();
+    };
+
+    aDiffer.SetOptions( options );
+}
+
+
+void KeepLoading( PROGRESS_REPORTER* aProgress )
+{
+    if( aProgress && !aProgress->KeepRefreshing() )
+        THROW_IO_CANCELLED();
+}
+
+
+wxString LoadingMessage( const wxString& aFile, const wxString& aLabel )
+{
+    const wxString name = wxFileName( aFile ).GetFullName();
+
+    if( aLabel.IsEmpty() )
+        return wxString::Format( _( "Loading %s..." ), name );
+
+    // Versions labels already start with the file name
+    if( aLabel.StartsWith( name + wxS( " " ) ) )
+        return wxString::Format( _( "Loading %s..." ), aLabel );
+
+    return wxString::Format( _( "Loading %s (%s)..." ), name, aLabel );
+}
 
 } // namespace KICAD_DIFF

@@ -63,6 +63,7 @@
 #include <tool/tool_manager.h>
 #include <project.h>
 #include <project/project_file.h>
+#include <wx/app.h>
 #include <wx/dir.h>
 #include <wx/file.h>
 #include <memory>
@@ -80,6 +81,7 @@
 #include <drawing_sheet/ds_data_model.h>
 #include <paths.h>
 #include <reporter.h>
+#include <widgets/wx_progress_reporters.h>
 #include <scoped_set_reset.h>
 #include <string_utils.h>
 
@@ -2809,17 +2811,19 @@ DS_PROXY_VIEW_ITEM* EESCHEMA_JOBS_HANDLER::getDrawingSheetProxyView( SCHEMATIC* 
 // a second LoadProject(path, true) destroys the first project and the first
 // schematic's m_project dangles. The destructor severs the link via
 // SetProject( nullptr ). Shared by every SCH diff/merge job.
-static SCRATCH_DOC<SCHEMATIC> loadScratchSchematic( SETTINGS_MANAGER& aMgr, const wxString& aPath )
+static SCRATCH_DOC<SCHEMATIC> loadScratchSchematic( SETTINGS_MANAGER& aMgr, const wxString& aPath,
+                                                    PROGRESS_REPORTER* aProgress = nullptr )
 {
     return LoadScratchDoc<SCHEMATIC>(
             aMgr, aPath,
-            [aPath]( PROJECT* aProject )
+            [aPath, aProgress]( PROJECT* aProject )
             {
                 return std::unique_ptr<SCHEMATIC>(
                         EESCHEMA_HELPERS::LoadSchematic( aPath,
                                                          /*aSetActive=*/false,
                                                          /*aForceDefaultProject=*/false, aProject,
-                                                         /*aCalculateConnectivity=*/false ) );
+                                                         /*aCalculateConnectivity=*/false,
+                                                         /*aRootReporter=*/nullptr, aProgress ) );
             },
             []( SCHEMATIC* aSch )
             {
@@ -2921,17 +2925,21 @@ int EESCHEMA_JOBS_HANDLER::JobSchDiff( JOB* aJob )
 static int loadSymbolLibrarySide( const wxString& aPath,
                                   std::vector<std::unique_ptr<LIB_SYMBOL>>& aOwners,
                                   KICAD_DIFF::SYM_LIB_DIFFER::SYMBOL_MAP& aMap, bool aAllowEmpty,
-                                  REPORTER& aReporter )
+                                  REPORTER& aReporter, PROGRESS_REPORTER* aProgress = nullptr )
 {
     if( aAllowEmpty && aPath.IsEmpty() )
         return CLI::EXIT_CODES::SUCCESS;
 
     try
     {
-        auto loaded = KICAD_DIFF::SYM_LIB_DIFFER::LoadLibrary( aPath );
+        auto loaded = KICAD_DIFF::SYM_LIB_DIFFER::LoadLibrary( aPath, aProgress );
         aOwners = std::move( loaded.first );
         aMap = std::move( loaded.second );
         return CLI::EXIT_CODES::SUCCESS;
+    }
+    catch( const IO_CANCELLED& )
+    {
+        return CLI::EXIT_CODES::ERR_CANCELLED;
     }
     catch( const IO_ERROR& ioe )
     {
@@ -3035,11 +3043,35 @@ struct SCH_DIFF_SIDES
 };
 
 
+// A progress reporter gets one phase per side and one for the diff, and a cancel returns ERR_CANCELLED
 static int loadSchDiffSides( SETTINGS_MANAGER& aMgr, REPORTER& aReporter, const wxString& aFileA,
-                             const wxString& aFileB, SCH_DIFF_SIDES& aSides )
+                             const wxString& aFileB, SCH_DIFF_SIDES& aSides, WX_PROGRESS_REPORTER* aProgress = nullptr,
+                             const wxString& aLabelA = wxEmptyString, const wxString& aLabelB = wxEmptyString )
 {
-    aSides.a = loadScratchSchematic( aMgr, aFileA );
-    aSides.b = loadScratchSchematic( aMgr, aFileB );
+    // The loader reports the path it opens, which for a downloaded version is a temporary folder
+    if( aProgress && !aFileA.IsEmpty() )
+        aProgress->PinMessage( KICAD_DIFF::LoadingMessage( aFileA, aLabelA ) );
+
+    aSides.a = loadScratchSchematic( aMgr, aFileA, aProgress );
+
+    if( aProgress )
+    {
+        if( aProgress->IsCancelled() )
+            return CLI::EXIT_CODES::ERR_CANCELLED;
+
+        aProgress->AdvancePhase();
+    }
+
+    if( aProgress && !aFileB.IsEmpty() )
+        aProgress->PinMessage( KICAD_DIFF::LoadingMessage( aFileB, aLabelB ) );
+
+    aSides.b = loadScratchSchematic( aMgr, aFileB, aProgress );
+
+    if( aProgress )
+        aProgress->UnpinMessage();
+
+    if( aProgress && aProgress->IsCancelled() )
+        return CLI::EXIT_CODES::ERR_CANCELLED;
 
     if( !aSides.a.doc && !aFileA.IsEmpty() )
     {
@@ -3066,7 +3098,16 @@ static int loadSchDiffSides( SETTINGS_MANAGER& aMgr, REPORTER& aReporter, const 
     aSides.schB = aSides.b.doc ? aSides.b.doc.get() : aSides.emptyB.doc.get();
 
     KICAD_DIFF::SCH_DIFFER differ( aSides.schA, aSides.schB, aFileB );
-    aSides.diff = differ.Diff();
+    KICAD_DIFF::ReportDiffProgress( differ, aProgress );
+
+    try
+    {
+        aSides.diff = differ.Diff();
+    }
+    catch( const IO_CANCELLED& )
+    {
+        return CLI::EXIT_CODES::ERR_CANCELLED;
+    }
 
     return CLI::EXIT_CODES::SUCCESS;
 }
@@ -3145,7 +3186,9 @@ int EESCHEMA_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxS
     SCOPED_SET_RESET<REPORTER*> reporterGuard( m_reporter,
                                                aReporter ? aReporter : m_reporter );
 
-    wxWindow*      parent = aParent ? aParent : ( wxTheApp ? wxTheApp->GetTopWindow() : nullptr );
+    // The progress dialog disables only its parent, and the caller may be a panel inside a larger window
+    wxWindow*      parent = aParent ? wxGetTopLevelParent( aParent )
+                                    : ( wxTheApp ? wxTheApp->GetTopWindow() : nullptr );
     const wxString labelA = aLabelA.IsEmpty() ? aFileA : aLabelA;
     const wxString labelB = aLabelB.IsEmpty() ? aFileB : aLabelB;
 
@@ -3155,11 +3198,21 @@ int EESCHEMA_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxS
     {
         SCH_DIFF_SIDES sides;
 
-        if( int rc = loadSchDiffSides( Pgm().GetSettingsManager(), *m_reporter, aFileA, aFileB, sides );
+        // The schematics load on the UI thread before the window opens, which takes seconds for a large one
+        auto progress = std::make_unique<WX_PROGRESS_REPORTER>( parent, _( "Compare Files" ), 4, PR_CAN_ABORT );
+        progress->SetRefreshOnPhaseChange( true );
+
+        if( int rc = loadSchDiffSides( Pgm().GetSettingsManager(), *m_reporter, aFileA, aFileB, sides,
+                                       progress.get(), aLabelA, aLabelB );
             rc != CLI::EXIT_CODES::SUCCESS )
         {
             return rc;
         }
+
+        progress->AdvancePhase( _( "Drawing..." ) );
+
+        if( !progress->KeepRefreshing() )
+            return CLI::EXIT_CODES::ERR_CANCELLED;
 
         SCHEMATIC*                         schA = sides.schA;
         SCHEMATIC*                         schB = sides.schB;
@@ -3228,6 +3281,8 @@ int EESCHEMA_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxS
                                    KICAD_DIFF::ConfigureSchDiffCanvasContext( aCanvas, nullptr, schB, color, {},
                                                                               deletedItems, {}, nullptr, compScreen );
                                } );
+
+        progress.reset();
         dlg.ShowModal();
 
         return CLI::EXIT_CODES::SUCCESS;
@@ -3239,20 +3294,57 @@ int EESCHEMA_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxS
         KICAD_DIFF::SYM_LIB_DIFFER::SYMBOL_MAP   mapA;
         KICAD_DIFF::SYM_LIB_DIFFER::SYMBOL_MAP   mapB;
 
-        if( int rc = loadSymbolLibrarySide( aFileA, ownersA, mapA, true, *m_reporter );
+        // A large library loads and compares on the UI thread before the window opens
+        auto progress = std::make_unique<WX_PROGRESS_REPORTER>( parent, _( "Compare Files" ), 4, PR_CAN_ABORT );
+        progress->SetRefreshOnPhaseChange( true );
+
+        if( !aFileA.IsEmpty() )
+            progress->PinMessage( KICAD_DIFF::LoadingMessage( aFileA, aLabelA ) );
+
+        // Refreshed at once, or the next phase replaces the pinned name before it is ever shown
+        if( !progress->KeepRefreshing() )
+            return CLI::EXIT_CODES::ERR_CANCELLED;
+
+        if( int rc = loadSymbolLibrarySide( aFileA, ownersA, mapA, true, *m_reporter, progress.get() );
             rc != CLI::EXIT_CODES::SUCCESS )
         {
             return rc;
         }
 
-        if( int rc = loadSymbolLibrarySide( aFileB, ownersB, mapB, true, *m_reporter );
+        progress->AdvancePhase();
+
+        if( !aFileB.IsEmpty() )
+            progress->PinMessage( KICAD_DIFF::LoadingMessage( aFileB, aLabelB ) );
+
+        if( !progress->KeepRefreshing() )
+            return CLI::EXIT_CODES::ERR_CANCELLED;
+
+        if( int rc = loadSymbolLibrarySide( aFileB, ownersB, mapB, true, *m_reporter, progress.get() );
             rc != CLI::EXIT_CODES::SUCCESS )
         {
             return rc;
         }
+
+        progress->UnpinMessage();
 
         KICAD_DIFF::SYM_LIB_DIFFER differ( mapA, mapB, aFileB );
-        KICAD_DIFF::DOCUMENT_DIFF  result = differ.Diff();
+        KICAD_DIFF::DOCUMENT_DIFF  result;
+
+        KICAD_DIFF::ReportDiffProgress( differ, progress.get() );
+
+        try
+        {
+            result = differ.Diff();
+        }
+        catch( const IO_CANCELLED& )
+        {
+            return CLI::EXIT_CODES::ERR_CANCELLED;
+        }
+
+        progress->AdvancePhase( _( "Drawing..." ) );
+
+        if( !progress->KeepRefreshing() )
+            return CLI::EXIT_CODES::ERR_CANCELLED;
 
         // The selected symbol is drawn whole, since outlines of every symbol pile up in one place
         DIALOG_KICAD_DIFF dlg( parent, labelA, labelB, result );
@@ -3261,6 +3353,8 @@ int EESCHEMA_JOBS_HANDLER::OpenDiffDialog( KICAD_DIFF::DOC_KIND aKind, const wxS
                 {
                     KICAD_DIFF::ShowSymbolPair( aCanvas, mapA, mapB, aName );
                 } );
+
+        progress.reset();
         dlg.ShowModal();
 
         return CLI::EXIT_CODES::SUCCESS;
@@ -3706,6 +3800,57 @@ int EESCHEMA_JOBS_HANDLER::runSymLibMerge( const wxString& aAncestor, const wxSt
 
     KICAD_DIFF::KICAD_MERGE_ENGINE engine;
     KICAD_DIFF::MERGE_PLAN         plan = engine.Plan( ourDocDiff, theirDocDiff );
+
+    auto savedText = []( const KICAD_DIFF::SYM_LIB_DIFFER::SYMBOL_MAP& aSide,
+                         const wxString&                               aName ) -> std::optional<std::string>
+    {
+        auto it = aSide.find( aName );
+
+        return it == aSide.end() ? std::nullopt
+                                 : std::optional<std::string>( KICAD_DIFF::SavedSymbolText( *it->second ) );
+    };
+
+    std::set<wxString> allNames;
+
+    for( const KICAD_DIFF::SYM_LIB_DIFFER::SYMBOL_MAP* side : { &ancestor.map, &ours.map, &theirs.map } )
+    {
+        for( const auto& [name, symbol] : *side )
+            allNames.insert( name );
+    }
+
+    // The saved text holds all a file keeps, so a side that saves as the ancestor did leaves the other side's
+    // symbol whole, even an edit the change records miss
+    for( const wxString& name : allNames )
+    {
+        const std::optional<std::string> base = savedText( ancestor.map, name );
+        const std::optional<std::string> mine = savedText( ours.map, name );
+        const std::optional<std::string> other = savedText( theirs.map, name );
+
+        if( mine == other || ( mine != base && other != base ) )
+            continue;
+
+        const KIID_PATH            id = KICAD_DIFF::LibraryItemKiidPath( name );
+        const KICAD_DIFF::ITEM_RES kind =
+                mine == base ? KICAD_DIFF::ITEM_RES::TAKE_THEIRS : KICAD_DIFF::ITEM_RES::TAKE_OURS;
+
+        auto action = std::ranges::find_if( plan.actions,
+                                            [&]( const KICAD_DIFF::ITEM_RESOLUTION& aAction )
+                                            {
+                                                return aAction.id == id;
+                                            } );
+
+        if( action == plan.actions.end() )
+        {
+            plan.actions.push_back( { id, kind, {} } );
+        }
+        else
+        {
+            action->kind = kind;
+            action->props.clear();
+        }
+
+        std::erase( plan.unresolved, id );
+    }
 
     std::map<KIID_PATH, const KICAD_DIFF::ITEM_CHANGE*> ourChanges = KICAD_DIFF::IndexChangesByKiid( ourDocDiff );
     std::map<KIID_PATH, const KICAD_DIFF::ITEM_CHANGE*> theirChanges = KICAD_DIFF::IndexChangesByKiid( theirDocDiff );

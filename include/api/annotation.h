@@ -17,16 +17,35 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <api/api_task_gui_reporter.h>
-#include <widgets/wx_event_utils.h>
+#ifndef KICAD_API_ANNOTATION_H
+#define KICAD_API_ANNOTATION_H
 
+#include <reporter.h>
+#include <wx/string.h>
 
-bool API_TASK_GUI_PROGRESS_REPORTER::updateUI()
+struct ANNOTATION_RESULT
 {
-    const bool result = WX_PROGRESS_REPORTER::updateUI();
+    int errorCount = 0;
+    int warningCount = 0;
+    int changeCount = 0;
+    int newFootprintCount = 0;
+};
 
-    // Serve pending API requests while the progress dialog updates
-    DrainPendingEvents( wxEVT_CATEGORY_THREAD );
+class API_ANNOTATION_REPORTER : public WX_STRING_REPORTER
+{
+public:
+    REPORTER& Report( const wxString& aText, SEVERITY aSeverity ) override
+    {
+        if( aSeverity == RPT_SEVERITY_ERROR )
+            errorCount++;
+        else if( aSeverity == RPT_SEVERITY_WARNING )
+            warningCount++;
 
-    return result;
-}
+        return WX_STRING_REPORTER::Report( aText, aSeverity );
+    }
+
+    int errorCount = 0;
+    int warningCount = 0;
+};
+
+#endif // KICAD_API_ANNOTATION_H

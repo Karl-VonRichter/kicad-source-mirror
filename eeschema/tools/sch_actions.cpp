@@ -216,6 +216,13 @@ TOOL_ACTION SCH_ACTIONS::compareLibraryWithFile( TOOL_ACTION_ARGS()
         .Tooltip( _( "Diff the current symbol library against another .kicad_sym file" ) )
         .Icon( BITMAPS::library ) );
 
+TOOL_ACTION SCH_ACTIONS::upgradeTeamLibraryFormat( TOOL_ACTION_ARGS()
+        .Name( "eeschema.SymbolLibraryControl.upgradeTeamLibraryFormat" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Upgrade Team Library Format..." ) )
+        .Tooltip( _( "Save the team library in the current file format and check that in for the team" ) )
+        .Icon( BITMAPS::library ) );
+
 TOOL_ACTION SCH_ACTIONS::newSymbol( TOOL_ACTION_ARGS()
         .Name( "eeschema.SymbolLibraryControl.newSymbol" )
         .Scope( AS_GLOBAL )
@@ -1339,6 +1346,12 @@ TOOL_ACTION SCH_ACTIONS::editSymbolFields( TOOL_ACTION_ARGS()
         .FriendlyName( _( "Bulk Edit Symbol Fields..." ) )
         .Tooltip( _( "Edit a table of fields from all symbols in the schematic" ) )
         .Icon( BITMAPS::spreadsheet ) );
+
+TOOL_ACTION SCH_ACTIONS::mdwAssignPart( TOOL_ACTION_ARGS()
+        .Name( "eeschema.MdwPartTool.assignPart" )
+        .Scope( AS_GLOBAL )
+        .FriendlyName( _( "Assign Part..." ) )
+        .Tooltip( _( "Link the selected symbol to a workspace part that uses it" ) ) );
 
 TOOL_ACTION SCH_ACTIONS::editSymbolLibraryLinks( TOOL_ACTION_ARGS()
         .Name( "eeschema.EditorControl.editSymbolLibraryLinks" )

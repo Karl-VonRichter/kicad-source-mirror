@@ -27,12 +27,15 @@
 #include <wx/debug.h>
 #include <wx/hyperlink.h>
 #include <wx/infobar.h>
+#include <wx/menu.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/timer.h>
+#include <wx/weakref.h>
 #include <wx/dcclient.h>
 
 #include <algorithm>
+#include <utility>
 
 #ifdef __WXMSW__
 #include <dpi_scaling_common.h>
@@ -160,6 +163,7 @@ WX_INFOBAR::~WX_INFOBAR()
 {
     m_anchor->Unbind( wxEVT_SIZE, &WX_INFOBAR::onSize, this );
 
+    m_afterDismiss.clear();
     delete m_showTimer;
 }
 
@@ -211,10 +215,15 @@ void WX_INFOBAR::ShowMessage( const wxString& aMessage, int aFlags )
 
     m_updateLock = true;
 
+    // What waited on the message being replaced, even under a hidden ancestor, has nothing left to wait for
+    if( IsShown() )
+        m_afterDismiss.clear();
+
     m_message = aMessage;
     m_message.Trim();
 
     wxInfoBarGeneric::ShowMessage( m_message, aFlags );
+    setMessageToolTip( m_message );
 
     KIPLATFORM::UI::KeepAboveExternalRendering( this );
 
@@ -254,6 +263,7 @@ void WX_INFOBAR::Dismiss()
     m_updateLock = true;
 
     wxInfoBarGeneric::Dismiss();
+    setMessageToolTip( wxEmptyString );
 
     stackOverlays();
     refreshParent();
@@ -262,6 +272,23 @@ void WX_INFOBAR::Dismiss()
         (*m_callback)();
 
     m_updateLock = false;
+
+    // Queued, since the dismissal may be inside a handler of the message being dismissed. Any call may
+    // destroy the infobar, so each one checks it is still alive
+    if( !m_afterDismiss.empty() )
+    {
+        CallAfter(
+                [bar = wxWeakRef<WX_INFOBAR>( this ), pending = std::exchange( m_afterDismiss, {} )]()
+                {
+                    for( const std::function<void()>& fn : pending )
+                    {
+                        if( !bar || bar->IsBeingDeleted() )
+                            return;
+
+                        fn();
+                    }
+                } );
+    }
 }
 
 
@@ -317,6 +344,24 @@ void WX_INFOBAR::FixSize()
     sizer->Prepend( icon, 0, wxLEFT | wxRIGHT, 5 );
     Layout();
 #endif
+}
+
+
+void WX_INFOBAR::setMessageToolTip( const wxString& aText )
+{
+    for( wxWindow* child : GetChildren() )
+    {
+        if( dynamic_cast<wxStaticText*>( child ) )
+        {
+            // Unset first so a tooltip already showing is rebuilt rather than kept
+            child->UnsetToolTip();
+
+            if( !aText.IsEmpty() )
+                child->SetToolTip( aText );
+
+            return;
+        }
+    }
 }
 
 
@@ -497,8 +542,8 @@ void WX_INFOBAR::AddButton( wxButton* aButton )
     aButton->SetWindowVariant( wxWINDOW_VARIANT_SMALL );
 #endif // __WXMAC__
 
-    // Shaped without alignment keeps each button at its own aspect at the top of the bar
-    m_buttonArea->Add( aButton, 0, wxSTRETCH_MASK );
+    // Centred like the links, so the close button sits level with the message
+    m_buttonArea->Add( aButton, wxSizerFlags().CentreVertical() );
 
     if( IsShownOnScreen() )
     {
@@ -515,13 +560,42 @@ void WX_INFOBAR::AddLink(const wxString& aLinkText, const std::function<void(wxH
 
     button->Bind( wxEVT_COMMAND_HYPERLINK, aFn );
 
-    m_buttonArea->Add( button, wxSizerFlags().Centre().Border( wxRIGHT ).Shaped() );
+    // The default border is too narrow to tell neighbouring links apart
+    m_buttonArea->Add( button, wxSizerFlags().CentreVertical().Border( wxRIGHT, FromDIP( 12 ) ) );
 
     if( IsShownOnScreen() )
     {
         Layout();
         sizer->Fit( this );
     }
+}
+
+
+void WX_INFOBAR::AddMenuLink( const wxString& aLinkText, const std::vector<MENU_LINK_ITEM>& aItems )
+{
+    AddLink( aLinkText + wxS( " \u25BC" ),
+             [aItems]( wxHyperlinkEvent& aEvent )
+             {
+                 constexpr int firstId = wxID_HIGHEST + 1;
+                 wxWindow*     link = dynamic_cast<wxWindow*>( aEvent.GetEventObject() );
+
+                 if( !link )
+                     return;
+
+                 wxMenu menu;
+
+                 for( size_t ii = 0; ii < aItems.size(); ++ii )
+                     menu.Append( firstId + static_cast<int>( ii ), aItems[ii].first );
+
+                 const int chosen = link->GetPopupMenuSelectionFromUser( menu, wxPoint( 0, link->GetSize().y ) );
+
+                 if( chosen < firstId || chosen >= firstId + static_cast<int>( aItems.size() ) )
+                     return;
+
+                 // Copied, since the entry may rebuild the infobar and free this handler
+                 std::function<void()> run = aItems[chosen - firstId].second;
+                 run();
+             } );
 }
 
 

@@ -857,6 +857,83 @@ BOOST_AUTO_TEST_CASE( RenamedSymbolLosesItsOldName )
 }
 
 
+/**
+ * Opening a name the editor renamed must not read the old symbol back into a second buffer, which the save would
+ * keep beside the new name.
+ */
+BOOST_AUTO_TEST_CASE( RenamedSymbolIsNotReopenedFromTheFile )
+{
+    wxString dir = wxFileName::CreateTempFileName( wxS( "kicad_test_" ) );
+    wxRemoveFile( dir );
+    wxFileName::Mkdir( dir );
+
+    wxFileName source( KI_TEST::GetTestDataRootDir(), wxS( "Device.kicad_sym" ) );
+    source.AppendDir( wxS( "libraries" ) );
+    source.AppendDir( wxS( "test_project" ) );
+
+    wxString path = wxFileName( dir, wxS( "Device.kicad_sym" ) ).GetFullPath();
+    BOOST_REQUIRE( wxCopyFile( source.GetFullPath(), path ) );
+
+    LIB_BUFFER libBuffer( wxS( "Device" ) );
+    bufferSymbols( libBuffer, path, { wxS( "C" ) } );
+
+    std::shared_ptr<SYMBOL_BUFFER> buf = libBuffer.GetBuffer( wxS( "C" ) );
+    BOOST_REQUIRE( buf );
+
+    renameBuffer( libBuffer, *buf, wxS( "C_Renamed" ) );
+    BOOST_CHECK( libBuffer.Availability( wxS( "C_Renamed" ) ) == SYMBOL_AVAILABILITY::BUFFERED );
+
+    // An open reads the file only for a name no buffer decides, as the Symbol Editor does
+    if( !libBuffer.Availability( wxS( "C" ) ) )
+        bufferSymbols( libBuffer, path, { wxS( "C" ) } );
+
+    saveLibrary( libBuffer, path );
+
+    BOOST_CHECK( inLibrary( path, wxS( "C_Renamed" ) ) );
+    BOOST_CHECK( !inLibrary( path, wxS( "C" ) ) );
+
+    wxFileName::Rmdir( dir, wxPATH_RMDIR_RECURSIVE );
+}
+
+
+/**
+ * Opening a derived symbol whose parent the editor renamed must not read the parent back into a second buffer,
+ * which the save would keep beside the new name.
+ */
+BOOST_AUTO_TEST_CASE( RenamedParentIsNotReopenedForAChild )
+{
+    wxString dir = wxFileName::CreateTempFileName( wxS( "kicad_test_" ) );
+    wxRemoveFile( dir );
+    wxFileName::Mkdir( dir );
+
+    wxString path = wxFileName( dir, wxS( "4xxx.kicad_sym" ) ).GetFullPath();
+    BOOST_REQUIRE( wxCopyFile( KI_TEST::GetEeschemaTestDataDir() + "/libs/4xxx.kicad_sym", path ) );
+
+    LIB_BUFFER libBuffer( wxS( "4xxx" ) );
+    bufferSymbols( libBuffer, path, { wxS( "4016" ) } );
+
+    std::shared_ptr<SYMBOL_BUFFER> buf = libBuffer.GetBuffer( wxS( "4016" ) );
+    BOOST_REQUIRE( buf );
+
+    renameBuffer( libBuffer, *buf, wxS( "4016_Renamed" ) );
+
+    {
+        IO_RELEASER<SCH_IO> plugin( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+        LIB_SYMBOL*         child = plugin->LoadSymbol( path, wxS( "4066" ) );
+
+        BOOST_REQUIRE( child && child->IsDerived() );
+        BOOST_CHECK_THROW( libBuffer.BufferLibrarySymbol( *child ), IO_ERROR );
+    }
+
+    saveLibrary( libBuffer, path );
+
+    BOOST_CHECK( inLibrary( path, wxS( "4016_Renamed" ) ) );
+    BOOST_CHECK( !inLibrary( path, wxS( "4016" ) ) );
+
+    wxFileName::Rmdir( dir, wxPATH_RMDIR_RECURSIVE );
+}
+
+
 /*
  * A pull can change a library under the editor's buffers. Saving one edited symbol must keep what the
  * file now holds for the others, and leave its derived symbols derived.
@@ -941,6 +1018,33 @@ BOOST_AUTO_TEST_CASE( SaveKeepsChangesMadeUnderTheBuffer )
     BOOST_CHECK( derived->IsDerived() );
 
     wxFileName::Rmdir( tempDir, wxPATH_RMDIR_RECURSIVE );
+}
+
+
+/*
+ * The tree re-reads a library only when its hash changes, so a pull that rewrites an unbuffered library file
+ * must change it
+ */
+BOOST_AUTO_TEST_CASE( LibraryFileHashFollowsFileWrites )
+{
+    wxString dir = wxFileName::CreateTempFileName( wxS( "kicad_test_" ) );
+    wxRemoveFile( dir );
+    wxFileName::Mkdir( dir );
+
+    wxFileName lib( dir, wxS( "4xxx.kicad_sym" ) );
+    BOOST_REQUIRE( wxCopyFile( KI_TEST::GetEeschemaTestDataDir() + "/libs/4xxx.kicad_sym", lib.GetFullPath() ) );
+
+    wxDateTime written( 1, wxDateTime::Jan, 2026, 12, 0, 0 );
+    BOOST_REQUIRE( lib.SetTimes( &written, &written, nullptr ) );
+
+    const int before = SYMBOL_LIBRARY_MANAGER::LibraryFileHash( wxS( "4xxx" ), lib.GetFullPath() );
+
+    written.Add( wxTimeSpan::Seconds( 5 ) );
+    BOOST_REQUIRE( lib.SetTimes( &written, &written, nullptr ) );
+
+    BOOST_CHECK_NE( SYMBOL_LIBRARY_MANAGER::LibraryFileHash( wxS( "4xxx" ), lib.GetFullPath() ), before );
+
+    wxFileName::Rmdir( dir, wxPATH_RMDIR_RECURSIVE );
 }
 
 

@@ -20,10 +20,13 @@
 
 #pragma once
 
+#include <memory>
 #include <set>
 #include <vector>
 
 #include <dialogs/dialog_fields_table.h>
+#include <mdw/client/mdw_client_types.h>
+#include <mdw/client/mdw_op.h>
 #include <fields_view_controls_grid_data_model.h>
 #include <sch_reference_list.h>
 #include <schematic.h>
@@ -33,6 +36,9 @@ wxDECLARE_EVENT( EDA_EVT_CLOSE_DIALOG_SYMBOL_FIELDS_TABLE, wxCommandEvent );
 
 class SCH_EDIT_FRAME;
 class JOB_EXPORT_BOM;
+class MDW_SOURCE;
+class PANEL_SYMBOL_FIELDS_WORKSPACE;
+struct MDW_PROJECT_STATE;
 class TEMPLATES;
 
 
@@ -50,6 +56,9 @@ public:
 
     /// Show the schematic's current variant, which the toolbar or an undo may have just changed.
     void FollowCurrentVariant();
+
+    /// The schematic is about to be freed or the table closed, so stop listening to it and stop every request.
+    void DetachFromSchematic();
 
 private:
     wxGridCellEditor* createDatasheetEditor() override;
@@ -80,6 +89,19 @@ private:
     void OnSchItemsChanged( SCHEMATIC& aSch, std::vector<SCH_ITEM*>& aSchItem ) override;
     void OnSchSheetChanged( SCHEMATIC& aSch ) override;
     void OnSchSelectionChanged( SCHEMATIC& aSch ) override;
+
+    void OnPageChanged( wxNotebookEvent& aEvent ) override;
+
+    /// Add the Workspace page when the project's source keeps a BOM
+    void addWorkspacePage();
+    /// aLink is why aDesign names no item, when it names none
+    void showWorkspacePage( const std::shared_ptr<MDW_SOURCE>& aSource, const MDW_PROJECT_STATE& aDesign,
+                            const MDW_RESULT& aLink = MDW_RESULT::Ok() );
+
+    /// Probe the schematic for the symbols at aPaths, as a selection on the Edit page does
+    void crossProbePaths( const std::vector<wxString>& aPaths );
+
+    void crossProbe( const std::set<SCH_REFERENCE>& aRefs );
 
     void rebuildRowsPreservingSelection();
     void rebuildRowsPreservingSelection( const std::set<KIID_PATH>& aSavedSelection );
@@ -115,6 +137,10 @@ private:
     SYMBOL_FIELDS_EDITOR_GRID_DATA_MODEL* m_dataModel = nullptr;
 
     TEMPLATES&                         m_templateFieldNames;
+
+    PANEL_SYMBOL_FIELDS_WORKSPACE*     m_workspacePage = nullptr;
+    MDW_OP                             m_projectStateOp; ///< Destroyed with the dialog, which cancels it
+    MDW_OP                             m_projectRefOp;
 
     bool m_aborted = false;
 

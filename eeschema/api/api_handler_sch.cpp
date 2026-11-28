@@ -20,10 +20,12 @@
 
 #include <api/api_handler_sch.h>
 #include <api/api_enums.h>
+#include <api/api_sch_annotation.h>
 #include <api/api_sch_utils.h>
 #include <api/api_utils.h>
 #include <api/api_server.h>
 #include <api/cross_probe_client.h>
+#include <api/internal/annotation.pb.h>
 #include <api/sch_context.h>
 #include <fmt.h>
 #include <fmt/ranges.h>
@@ -84,6 +86,7 @@
 #include <trace_helpers.h>
 
 using namespace kiapi::common::commands;
+using namespace kiapi::internal;
 using kiapi::common::types::CommandStatus;
 using kiapi::common::types::DocumentType;
 using kiapi::common::types::ItemRequestStatus;
@@ -212,6 +215,9 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<GetPageSettings, types::PageSettings>( &API_HANDLER_SCH::handleGetPageSettings );
     registerHandler<SetPageSettings, types::PageSettings>( &API_HANDLER_SCH::handleSetPageSettings );
     registerHandler<GetSchematicNetlist, SchematicNetlistResponse>( &API_HANDLER_SCH::handleGetSchematicNetlist );
+    registerHandler<kiapi::common::commands::UpdateSchematicFromBoard,
+                    kiapi::common::commands::BackAnnotationResponse>(
+            &API_HANDLER_SCH::handleUpdateSchematicFromBoard );
     registerHandler<CrossProbeAnnounce, CrossProbeAnnounceResponse>( &API_HANDLER_SCH::handleCrossProbeAnnounce );
     registerHandler<kiapi::schematic::tasks::StartErcTask, kiapi::common::tasks::StartTaskResponse>(
             &API_HANDLER_SCH::handleStartErcTask );
@@ -245,6 +251,236 @@ API_HANDLER_SCH::API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext,
     registerHandler<NewLibrarySymbol, LibrarySymbolResponse>( &API_HANDLER_SCH::handleNewLibrarySymbol );
     registerHandler<EditLibrarySymbol, LibrarySymbolResponse>( &API_HANDLER_SCH::handleEditLibrarySymbol );
     registerHandler<OpenFootprintEditor, Empty>( &API_HANDLER_SCH::handleOpenFootprintEditor );
+}
+
+
+bool API_HANDLER_SCH::HandleInternalApiRequest( const std::string& aRequest, std::string& aResponse )
+{
+    ApiRequest envelope;
+
+    if( !envelope.ParseFromString( aRequest ) )
+        return false;
+
+    // Only one request for now... can make this more complicated later if we need to.
+    GenerateNetlistRequest request;
+
+    if( !envelope.message().UnpackTo( &request ) )
+        return false;
+
+    ApiResponse response;
+
+    if( HANDLER_RESULT<bool> validation = validateDocument( request.document() ); !validation )
+    {
+        *response.mutable_status() = validation.error();
+        aResponse = response.SerializeAsString();
+        return true;
+    }
+
+    if( !m_commits.empty() )
+    {
+        response.mutable_status()->set_status( AS_BUSY );
+        response.mutable_status()->set_error_message( "annotation cannot run while a commit is open" );
+        aResponse = response.SerializeAsString();
+        return true;
+    }
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+    {
+        *response.mutable_status() = *busy;
+        aResponse = response.SerializeAsString();
+        return true;
+    }
+
+    WX_STRING_REPORTER reporter;
+    std::string        netlist;
+
+    GenerateNetlistResponse result;
+    result.set_success( GenerateSchematicNetlist( *schematic(), context()->GetKiway(), netlist, reporter ) );
+    result.set_netlist( netlist );
+    result.set_report( reporter.GetMessages().ToStdString() );
+
+    response.mutable_message()->PackFrom( result );
+
+    if( result.success() )
+    {
+        response.mutable_status()->set_status( AS_OK );
+    }
+    else
+    {
+        response.mutable_status()->set_status( AS_BAD_REQUEST );
+        response.mutable_status()->set_error_message( result.report() );
+    }
+
+    aResponse = response.SerializeAsString();
+    return true;
+}
+
+
+bool API_HANDLER_SCH::processApiRequest( KIWAY::FACE_T aFace, const std::string& aRequest, std::string& aResponse )
+{
+    KIWAY* kiway = context()->GetKiway();
+    return kiway && kiway->ProcessApiRequest( aFace, aRequest, aResponse );
+}
+
+
+HANDLER_RESULT<BackAnnotationResponse>
+API_HANDLER_SCH::handleUpdateSchematicFromBoard( const HANDLER_CONTEXT<UpdateSchematicFromBoard>& aCtx )
+{
+    if( HANDLER_RESULT<bool> validation = validateDocument( aCtx.Request.schematic() ); !validation )
+        return tl::unexpected( validation.error() );
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( !m_commits.empty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BUSY );
+        e.set_error_message( "annotation cannot run while a commit is open" );
+        return tl::unexpected( e );
+    }
+
+    GenerateNetlistRequest netlistRequest;
+    *netlistRequest.mutable_document() = aCtx.Request.board();
+
+    ApiRequest envelope;
+    envelope.mutable_message()->PackFrom( netlistRequest );
+
+    std::string reply;
+
+    if( !processApiRequest( KIWAY::FACE_PCB, envelope.SerializeAsString(), reply ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_NOT_READY );
+        e.set_error_message( "the board is not open" );
+        return tl::unexpected( e );
+    }
+
+    ApiResponse remoteResponse;
+
+    if( !remoteResponse.ParseFromString( reply ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_INTERNAL_ERROR );
+        e.set_error_message( "the board netlist reply could not be read" );
+        return tl::unexpected( e );
+    }
+
+    if( remoteResponse.status().status() != ApiStatusCode::AS_OK )
+    {
+        ApiResponseStatus e;
+        e.set_status( remoteResponse.status().status() == ApiStatusCode::AS_UNHANDLED
+                              ? ApiStatusCode::AS_BAD_REQUEST
+                              : remoteResponse.status().status() );
+        e.set_error_message( remoteResponse.status().error_message() );
+        return tl::unexpected( e );
+    }
+
+    GenerateNetlistResponse netlistResult;
+
+    if( !remoteResponse.message().UnpackTo( &netlistResult ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_INTERNAL_ERROR );
+        e.set_error_message( "the board netlist reply has an unexpected type" );
+        return tl::unexpected( e );
+    }
+
+    if( !netlistResult.success() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( netlistResult.report() );
+        return tl::unexpected( e );
+    }
+
+    const BackAnnotationSettings& settings = aCtx.Request.settings();
+
+    API_ANNOTATION_REPORTER reporter;
+    ANNOTATION_RESULT       result;
+
+    if( !ApplyBoardNetlistToSchematic( context(), frame(), netlistResult.netlist(), settings, result, reporter ) )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( reporter.GetMessages().ToUTF8() );
+        return tl::unexpected( e );
+    }
+
+    uint32_t    relinkErrors = 0;
+    uint32_t    relinkWarnings = 0;
+    std::string relinkReport;
+
+    if( settings.reference_mode() ==  BackAnnotationReferenceMode::BARM_RELINK_FOOTPRINTS && !settings.dry_run() )
+    {
+        std::string schematicNetlist;
+
+        if( GenerateSchematicNetlist( *schematic(), context()->GetKiway(), schematicNetlist, reporter ) )
+        {
+            RelinkFootprintsRequest relinkRequest;
+            *relinkRequest.mutable_board() = aCtx.Request.board();
+            relinkRequest.set_schematic_netlist( schematicNetlist );
+
+            ApiRequest relinkEnvelope;
+            relinkEnvelope.mutable_message()->PackFrom( relinkRequest );
+
+            std::string relinkReply;
+
+            if( processApiRequest( KIWAY::FACE_PCB, relinkEnvelope.SerializeAsString(), relinkReply ) )
+            {
+                ApiResponse              relinkResponse;
+                RelinkFootprintsResponse relinkResult;
+
+                if( !relinkResponse.ParseFromString( relinkReply ) )
+                {
+                    ++relinkErrors;
+                    relinkReport = "the footprint relink reply could not be read";
+                }
+                else if( relinkResponse.status().status() != ApiStatusCode::AS_OK )
+                {
+                    ++relinkErrors;
+                    relinkReport = relinkResponse.status().error_message();
+                }
+                else if( !relinkResponse.message().UnpackTo( &relinkResult ) )
+                {
+                    ++relinkErrors;
+                    relinkReport = "the footprint relink reply has an unexpected type";
+                }
+                else
+                {
+                    relinkErrors = relinkResult.error_count();
+                    relinkWarnings = relinkResult.warning_count();
+                    relinkReport = relinkResult.report();
+
+                    if( !relinkResult.success() )
+                        ++relinkErrors;
+                }
+            }
+            else
+            {
+                ++relinkErrors;
+                relinkReport = "the board is not open for relinking";
+            }
+        }
+        else
+        {
+            ++relinkErrors;
+            relinkReport = "the schematic netlist for relinking could not be generated";
+        }
+    }
+
+    std::string report = reporter.GetMessages().ToUTF8().data();
+
+    if( !relinkReport.empty() )
+        report += "\n" + relinkReport;
+
+    BackAnnotationResponse response;
+    response.set_error_count( static_cast<uint32_t>( reporter.errorCount ) + relinkErrors );
+    response.set_warning_count( static_cast<uint32_t>( reporter.warningCount ) + relinkWarnings );
+    response.set_change_count( static_cast<uint32_t>( result.changeCount ) );
+    response.set_report( report );
+
+    return response;
 }
 
 
@@ -2502,7 +2738,7 @@ bool sheetContainsOnlyWantedItems(
 
 std::optional<std::tuple<SCH_SHEET_PATH, SCH_ITEM*, std::vector<SCH_ITEM*>>>
 findItemsFromSyncSelection( const SCHEMATIC& aSchematic,
-                            const kiapi::common::commands::SyncSelection& aSync )
+                            const kiapi::internal::SyncSelection& aSync )
 {
     std::unordered_map<wxString, std::vector<SCH_REFERENCE>>             syncSymMap;
     std::unordered_map<wxString, std::unordered_map<wxString, SCH_PIN*>> syncPinMap;
@@ -2525,20 +2761,20 @@ findItemsFromSyncSelection( const SCHEMATIC& aSchematic,
             orderedSheets.push_back( sheetPath );
     }
 
-    const bool focusOnFirst = ( aSync.mode() == kiapi::common::commands::SSM_ITEMS_AND_NETS ) && aSync.has_focus_item();
+    const bool focusOnFirst = ( aSync.mode() == kiapi::internal::SSM_ITEMS_AND_NETS ) && aSync.has_focus_item();
 
-    for( const kiapi::common::commands::SelectionSpec& spec : aSync.items() )
+    for( const kiapi::internal::SelectionSpec& spec : aSync.items() )
     {
         switch( spec.spec_case() )
         {
-        case kiapi::common::commands::SelectionSpec::kFootprint:
+        case kiapi::internal::SelectionSpec::kFootprint:
         {
             wxString symRef = wxString::FromUTF8( spec.footprint().reference() );
             syncSymMap[symRef] = std::vector<SCH_REFERENCE>();
             break;
         }
 
-        case kiapi::common::commands::SelectionSpec::kPad:
+        case kiapi::internal::SelectionSpec::kPad:
         {
             wxString symRef = wxString::FromUTF8( spec.pad().reference() );
             wxString padNum = wxString::FromUTF8( spec.pad().number() );
@@ -2553,7 +2789,7 @@ findItemsFromSyncSelection( const SCHEMATIC& aSchematic,
 
     if( focusOnFirst )
     {
-        const kiapi::common::commands::SelectionSpec& focusSpec = aSync.focus_item();
+        const kiapi::internal::SelectionSpec& focusSpec = aSync.focus_item();
 
         if( focusSpec.has_footprint() )
             focusSymbol = wxString::FromUTF8( focusSpec.footprint().reference() );

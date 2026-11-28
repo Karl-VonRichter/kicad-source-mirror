@@ -314,6 +314,11 @@ struct KIFACE
      * Returns true if a load was started.
      */
     virtual bool LoadAllLibraries() { return false; }
+
+    virtual bool HandleApiRequest( const std::string& aRequest, std::string& aResponse )
+    {
+        return false;
+    }
 };
 
 
@@ -383,6 +388,14 @@ public:
      *         failed.  A load failure is reported once through wxLog; this never throws.
      */
     virtual KIFACE* KiFACE( FACE_T aFaceId, bool doLoad = true );
+
+    /**
+     * Under the project manager the libraries of a face load once an editor that uses them is open, since they
+     * stay in memory for as long as the process lives.  Call from the main thread only.
+     *
+     * @return true when the kiface of aFace should preload its libraries now.
+     */
+    bool IsLibraryPreloadWanted( FACE_T aFace );
 
     /**
      * Return the #KIWAY_PLAYER* given a FRAME_T.
@@ -513,6 +526,9 @@ public:
     bool ProcessApiCloseDocument( KIWAY::FACE_T aFace, const KIFACE::DOCUMENT_SPEC& aSpec,
                                   KICAD_API_SERVER* aServer,
                                   wxString* aError = nullptr );
+
+    bool ProcessApiRequest( KIWAY::FACE_T aFace, const std::string& aRequest,
+                            std::string& aResponse );
     bool ProcessJobConfigDialog( KIWAY::FACE_T aFace, JOB* aJob, wxWindow* aWindow );
 
     bool ProcessApiOpenDocument( KIWAY::FACE_T aFace, const KIFACE::DOCUMENT_SPEC& aSpec,
@@ -548,6 +564,9 @@ private:
      *         or NULL if this KIWAY_PLAYER was not yet created, or was closed
      */
     KIWAY_PLAYER* GetPlayerFrame( FRAME_T aFrameType );
+
+    /// True when an editor or viewer that uses the libraries of aFace is open
+    bool hasLibraryPlayer( FACE_T aFace );
 
     static std::array<KIFACE*,KIWAY_FACE_COUNT>  m_kiface;
     static std::array<int,KIWAY_FACE_COUNT>      m_kiface_version;

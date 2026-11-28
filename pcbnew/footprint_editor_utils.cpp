@@ -240,7 +240,7 @@ void FOOTPRINT_EDIT_FRAME::UpdateLibraryTree( const wxDataViewItem& aTreeItem, F
     if( aTreeItem.IsOk() )   // Can be not found in tree if the current footprint is imported
                              // from file therefore not yet in tree.
     {
-        static_cast<LIB_TREE_NODE_ITEM*>( aTreeItem.GetID() )->Update( &footprintInfo );
+        m_adapter->UpdateItem( *static_cast<LIB_TREE_NODE_ITEM*>( aTreeItem.GetID() ), &footprintInfo );
         m_treePane->GetLibTree()->RefreshLibTree();
     }
 }
@@ -427,6 +427,26 @@ bool FOOTPRINT_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileS
 }
 
 
+void FOOTPRINT_EDIT_FRAME::reportLibraryNotEnabled( const wxString& aNickname )
+{
+    wxString msg = wxString::Format( _( "The footprint library '%s' is not enabled in the current configuration." ),
+                                     aNickname );
+
+    msg += wxS( "\n" ) + _( "Use Manage Footprint Libraries to edit the configuration." );
+    DisplayErrorMessage( this, _( "Footprint library not enabled." ), msg );
+}
+
+
+void FOOTPRINT_EDIT_FRAME::openLibraryFootprint( const LIB_ID& aFPID )
+{
+    LoadFootprintFromLibrary( aFPID );
+
+    // Save As and the other library actions act on the tree's selection, which still names the previous part
+    if( m_treePane )
+        GetLibTree()->Unselect();
+}
+
+
 void FOOTPRINT_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 {
     const std::string& payload = mail.GetPayload();
@@ -455,23 +475,15 @@ void FOOTPRINT_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
             libNickname = ( *optRow )->Nickname();
 
-            if( !adapter->HasLibrary( libNickname, true ) )
+            // An editor created for this mail starts its library preload only afterwards
+            if( !adapter->LoadEnabledLibrary( libNickname ) )
             {
-                msg.Printf( _( "The footprint library '%s' is not enabled in the current configuration." ),
-                            libNickname );
-                msg += wxS( "\n" ) + _( "Use Manage Footprint Libraries to edit the configuration." );
-                DisplayErrorMessage( this, _( "Footprint library not enabled." ), msg );
+                reportLibraryNotEnabled( libNickname );
                 break;
             }
 
-            LIB_ID  fpId( libNickname, fpFileName.GetName() );
-
-            if( m_treePane )
-            {
-                m_treePane->GetLibTree()->SelectLibId( fpId );
-                wxCommandEvent event( EVT_LIBITEM_CHOSEN );
-                wxPostEvent( m_treePane, event );
-            }
+            // The tree of an editor created for this mail has no rows until the preload ends
+            openLibraryFootprint( LIB_ID( libNickname, fpFileName.GetName() ) );
         }
 
         break;
@@ -482,7 +494,36 @@ void FOOTPRINT_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
         if( fpId.Parse( wxString::FromUTF8( payload ) ) == -1 && fpId.IsValid() )
         {
-            LoadFootprintFromLibrary( fpId );
+            FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &Prj() );
+            const wxString             nickname = fpId.GetLibNickname();
+
+            // An editor created for this mail starts its library preload only afterwards
+            if( !adapter->LoadEnabledLibrary( nickname ) )
+            {
+                reportLibraryNotEnabled( nickname );
+                break;
+            }
+
+            bool exists = false;
+
+            // The part can have left its library since the request named it
+            try
+            {
+                exists = adapter->FootprintExists( nickname, fpId.GetLibItemName() );
+            }
+            catch( const IO_ERROR& )
+            {
+                // An unreadable footprint cannot be opened either
+            }
+
+            if( !exists )
+            {
+                DisplayErrorMessage( this, wxString::Format( _( "Footprint '%s' was not found in library '%s'." ),
+                                                             fpId.GetLibItemName().wx_str(), nickname ) );
+                break;
+            }
+
+            openLibraryFootprint( fpId );
             Raise();
         }
 
@@ -500,6 +541,7 @@ void FOOTPRINT_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
     case MAIL_RELOAD_LIB:
         SyncLibraryTree( true );
         RefreshLibraryTree();
+        refreshStaleFootprintTabs();
         break;
 
     default:

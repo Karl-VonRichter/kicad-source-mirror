@@ -94,6 +94,8 @@
 #include <project/project_local_settings.h>
 #include <settings/common_settings.h>
 #include <settings/settings_manager.h>
+#include <widgets/mdw_library_notice.h>
+#include <widgets/mdw_status_pill.h>
 #include <local_history.h>
 #include <tool/tool_manager.h>
 #include <tool/tool_dispatcher.h>
@@ -643,6 +645,15 @@ PCB_EDIT_FRAME::PCB_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent ) :
 
         m_eventCounterTimer->Start( 1000 );
     }
+
+    if( GetStatusBar() )
+    {
+        m_workspacePill = new MDW_STATUS_PILL( GetStatusBar() );
+        m_workspacePill->PlaceInStatusBar( 7 );
+        UpdateWorkspacePill();
+    }
+
+    m_libraryUpdates = WatchTeamLibraryUpdates( this );
 
     m_acceptedExts.emplace( FILEEXT::KiCadPcbFileExtension, &PCB_ACTIONS::ddAppendBoard );
     m_acceptedExts.emplace( FILEEXT::LegacyPcbFileExtension, &PCB_ACTIONS::ddAppendBoard );
@@ -2456,6 +2467,15 @@ void PCB_EDIT_FRAME::SetLastPath( LAST_PATH_TYPE aType, const wxString& aLastPat
 }
 
 
+bool PCB_EDIT_FRAME::HandleApiRequest( const std::string& aRequest, std::string& aResponse )
+{
+    if( !m_apiHandler )
+        return false;
+
+    return m_apiHandler->HandleInternalApiRequest( aRequest, aResponse );
+}
+
+
 void PCB_EDIT_FRAME::OnModify()
 {
     PCB_BASE_FRAME::OnModify();
@@ -2513,6 +2533,20 @@ void PCB_EDIT_FRAME::HardRedraw()
     std::vector<MSG_PANEL_ITEM> msg_list;
     GetBoard()->GetMsgPanelInfo( this, msg_list );
     SetMsgPanel( msg_list );
+}
+
+
+void PCB_EDIT_FRAME::UpdateWorkspacePill()
+{
+    if( !m_workspacePill )
+        return;
+
+    m_workspacePill->TrackProject( Prj().GetProjectFullName(),
+                                   Pgm().MdwFrameworkOrNull() != nullptr,
+                                   [this]()
+                                   {
+                                       return GetBoard()->GetFileName();
+                                   } );
 }
 
 
@@ -2874,6 +2908,7 @@ void PCB_EDIT_FRAME::CommonSettingsChanged( int aFlags )
 {
     PCB_BASE_EDIT_FRAME::CommonSettingsChanged( aFlags );
     m_appearancePanel->CommonSettingsChanged( aFlags );
+    UpdateWorkspacePill();
 
     PrepareLayerIndicator();
 

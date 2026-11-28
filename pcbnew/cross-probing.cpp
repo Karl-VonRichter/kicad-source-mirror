@@ -30,7 +30,8 @@
 #include <api/api_handler_pcb.h>
 #include <wx/tokenzr.h>
 #include <api/api_utils.h>
-#include <api/common/commands/cross_probe_commands.pb.h>
+#include <api/api_pcb_annotation.h>
+#include <api/internal/cross_probe_commands.pb.h>
 #include <api/cross_probe_client.h>
 #include <board.h>
 #include <board_design_settings.h>
@@ -73,6 +74,7 @@
 #include <libraries/library_manager.h>
 #include <libraries/library_table.h>
 #include <unordered_set>
+#include <json_common.h>
 
 #include <wx/filename.h>
 #include <wx/log.h>
@@ -80,6 +82,7 @@
 
 
 using namespace kiapi::common::commands;
+using namespace kiapi::internal;
 
 /* Execute a remote command sent via a socket on port KICAD_PCB_PORT_SERVICE_NUMBER
  *
@@ -565,7 +568,7 @@ void PCB_EDIT_FRAME::SendSelectItemsToSch( const std::deque<EDA_ITEM*>& aItems, 
 
 void PCB_EDIT_FRAME::SendCrossProbeNetName( const wxString& aNetName )
 {
-    kiapi::common::commands::HighlightNets message;
+    kiapi::internal::HighlightNets message;
 
     message.add_net_name( aNetName.ToUTF8() );
 
@@ -591,7 +594,7 @@ void PCB_EDIT_FRAME::SendCrossProbeItem( BOARD_ITEM* aSyncItem )
         return;
     }
 
-    kiapi::common::commands::FocusOnItem message;
+    kiapi::internal::FocusOnItem message;
     SelectionSpec* spec = message.mutable_focus_item();
 
     switch( aSyncItem->Type() )
@@ -664,58 +667,11 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
     case MAIL_PCB_GET_NETLIST:
     {
-        NETLIST          netlist;
-        STRING_FORMATTER sf;
+        std::string netlist;
 
-        for( FOOTPRINT* footprint : GetBoard()->Footprints() )
-        {
-            if( footprint->GetAttributes() & FP_BOARD_ONLY )
-                continue; // Don't add board-only footprints to the netlist
+        GenerateBoardNetlist( *GetBoard(), netlist );
 
-            COMPONENT* component = new COMPONENT( footprint->GetFPID(), footprint->GetReference(),
-                                                  footprint->GetValue(), footprint->GetPath(), {} );
-
-            for( PAD* pad : footprint->Pads() )
-            {
-                const wxString& netname = pad->GetShortNetname();
-
-                if( !netname.IsEmpty() )
-                    component->AddNet( pad->GetNumber(), netname, pad->GetPinFunction(), pad->GetPinType() );
-            }
-
-            nlohmann::ordered_map<wxString, wxString> fields;
-
-            for( PCB_FIELD* field : footprint->GetFields() )
-            {
-                wxCHECK2( field, continue );
-
-                fields[field->GetUntranslatedName()] = field->GetText();
-            }
-
-            component->SetFields( fields );
-
-            // Add DNP and exclusion properties
-            std::map<wxString, wxString> properties;
-
-            if( footprint->GetAttributes() & FP_DNP )
-                properties.emplace( "dnp", "" );
-
-            if( footprint->GetAttributes() & FP_EXCLUDE_FROM_BOM )
-                properties.emplace( "exclude_from_bom", "" );
-
-            if( footprint->GetAttributes() & FP_EXCLUDE_FROM_SIM )
-                properties.emplace( "exclude_from_sim", "" );
-
-            if( footprint->GetAttributes() & FP_EXCLUDE_FROM_POS_FILES )
-                properties.emplace( "exclude_from_pos_files", "" );
-
-            component->SetProperties( properties );
-
-            netlist.AddComponent( component );
-        }
-
-        netlist.Format( "pcb_netlist", &sf, 0, CTL_OMIT_FILTERS );
-        payload = sf.GetString();
+        payload = netlist;
         break;
     }
 
@@ -896,6 +852,10 @@ void PCB_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         if( SavePcbFile( Prj().AbsolutePath( GetBoard()->GetFileName() ) ) )
             payload = "success";
 
+        break;
+
+    case MAIL_REVIEW_LIBRARY_UPDATES:
+        m_toolManager->PostAction( PCB_ACTIONS::updateFootprints );
         break;
 
     case MAIL_PCB_RELOAD:

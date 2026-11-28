@@ -42,6 +42,7 @@
 #include <widgets/net_navigator_tree.h>
 #include <map>
 #include <connectivity/conn_subscription.h>
+#include <mdw/client/mdw_subscription.h>
 
 class SCH_ITEM;
 class EDA_ITEM;
@@ -71,6 +72,7 @@ class PROGRESS_REPORTER;
 class wxSearchCtrl;
 class wxGenericTreeCtrl;
 class BITMAP_BUTTON;
+class MDW_STATUS_PILL;
 
 
 namespace SCH_CONNECTIVITY
@@ -218,6 +220,10 @@ public:
      */
     void SetContentModified( bool aModified );
 
+    /// Recompute the Design Workspace status pill from the active project's session and
+    /// re-observe its event bus. Safe to call with no binding or in standalone mode.
+    void UpdateWorkspacePill();
+
     SEVERITY GetSeverity( int aErrorCode ) const override;
 
     /**
@@ -353,6 +359,8 @@ public:
      * Tell Pcbnew to clear the existing highlighted net, if one exists
      */
     void SendCrossProbeClearHighlight();
+
+    bool HandleApiRequest( const std::string& aRequest, std::string& aResponse );
 
     const wxString& GetHighlightedConnection() const
     {
@@ -1123,6 +1131,29 @@ private:
     void initScreenZoom();
 
     /**
+     * Leave the frame on an empty schematic after a load that failed or was cancelled.
+     *
+     * SetSchematic() has already freed the old sheets, so every view that holds a sheet path,
+     * such as the hierarchy navigator and the navigation history, is rebuilt.
+     */
+    void showEmptySchematic();
+
+    /**
+     * Send #EDA_EVT_SCHEMATIC_CHANGED to this frame and to every schematic change listener.
+     */
+    void broadcastSchematicChanged();
+
+    /**
+     * Make the symbol fields table let go of the schematic before it is freed.
+     *
+     * The table is destroyed with any unsaved edits, as on a project change.
+     */
+    void releaseSchematic();
+
+    /// Destroy the symbol fields table, which holds pointers into the schematic, discarding unsaved edits.
+    void destroySymbolFieldsTable();
+
+    /**
      * Verify that the symbol library links \a aSheet and all of its child sheets have
      * been remapped to the symbol library table.
      *
@@ -1218,6 +1249,8 @@ private:
     DIALOG_ERC*                 m_ercDialog;
     DIALOG_BOOK_REPORTER*       m_diffSymbolDialog;
     HIERARCHY_PANE*             m_hierarchy;
+    MDW_STATUS_PILL*            m_workspacePill = nullptr;
+    MDW_SUBSCRIPTION            m_libraryUpdates;
     DIALOG_SYMBOL_FIELDS_TABLE* m_symbolFieldsTableDialog;
     DIALOG_SCHEMATIC_SETUP*     m_schematicSetupDialog;
 

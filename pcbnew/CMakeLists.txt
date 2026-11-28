@@ -511,6 +511,7 @@ set( PCBNEW_CLASS_SRCS
     api/api_handler_pcb_tasks.cpp
     api/footprint_context.cpp
     api/headless_pcb_context.cpp
+    api/api_pcb_annotation.cpp
     api/headless_footprint_context.cpp
     api/pcb_context.cpp
 
@@ -600,6 +601,7 @@ set( PCBNEW_GIT_SRCS
 set( PCBNEW_DIFF_MERGE_SRCS
     diff_merge/pcb_differ.cpp
     diff_merge/pcb_merge_applier.cpp
+    diff_merge/fp_digest.cpp
     diff_merge/fp_lib_differ.cpp
     diff_merge/pcb_geometry_extractor.cpp
     diff_merge/pcb_diff_canvas_context.cpp

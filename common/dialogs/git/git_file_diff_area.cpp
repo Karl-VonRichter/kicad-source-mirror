@@ -19,11 +19,11 @@
 
 #include <dialogs/git/git_file_diff_area.h>
 
-#include <algorithm>
 #include <fstream>
 #include <optional>
 #include <utility>
 
+#include <wx/filename.h>
 #include <wx/sizer.h>
 #include <wx/splitter.h>
 #include <wx/stattext.h>
@@ -45,32 +45,6 @@
 namespace
 {
 
-// Where to open the before and after canvases: on the first change, padded to a readable size.
-std::optional<BOX2I> firstChangeBox( const KICAD_DIFF::DIFF_SCENE& aScene, KICAD_DIFF::DOC_KIND aKind )
-{
-    for( const std::vector<KICAD_DIFF::SCENE_SHAPE>* shapes : { &aScene.modifiedShapes,
-                                                                &aScene.addedShapes,
-                                                                &aScene.removedShapes } )
-    {
-        if( shapes->empty() )
-            continue;
-
-        BOX2I box = shapes->front().bbox;
-
-        if( box.GetWidth() <= 0 || box.GetHeight() <= 0 )
-            continue;
-
-        int minSide = KICAD_DIFF::IuScaleForDocKind( aKind ).mmToIU( 50 );
-        int padX = static_cast<int>( minSide - box.GetWidth() ) / 2;
-        int padY = static_cast<int>( minSide - box.GetHeight() ) / 2;
-        box.Inflate( std::max( 0, padX ), std::max( 0, padY ) );
-        return box;
-    }
-
-    return std::nullopt;
-}
-
-
 std::string readAll( const wxString& aFile )
 {
     if( aFile.IsEmpty() )
@@ -78,6 +52,50 @@ std::string readAll( const wxString& aFile )
 
     std::ifstream in( aFile.fn_str(), std::ios::binary );
     return std::string( ( std::istreambuf_iterator<char>( in ) ), std::istreambuf_iterator<char>() );
+}
+
+
+// ShowSides diffs on the UI thread, so a larger file would stall it
+constexpr unsigned long SIDES_TEXT_LIMIT = 1024 * 1024; // 1 MiB
+
+
+bool tooLargeToDiffHere( const wxString& aFile )
+{
+    if( aFile.IsEmpty() )
+        return false;
+
+    const wxULongLong size = wxFileName::GetSize( aFile );
+
+    return size != wxInvalidSize && size > SIDES_TEXT_LIMIT;
+}
+
+
+// False, with the error set, when either side is not plain text
+bool diffTextSides( GIT_FILE_SIDES& aSides, std::vector<KIGIT::TEXT_DIFF_LINE>& aLines )
+{
+    std::string before = readAll( aSides.before );
+    std::string after = readAll( aSides.after );
+
+    if( KIGIT::TextLooksBinary( before ) || KIGIT::TextLooksBinary( after ) )
+    {
+        aSides.error = _( "This is not a plain text file, so there is no comparison to show." );
+        return false;
+    }
+
+    aLines = KIGIT::BuildTextDiff( KIGIT::SplitTextLines( before ), KIGIT::SplitTextLines( after ) );
+    return true;
+}
+
+
+// Reads every sheet a hierarchy reaches, so it runs on a worker where a slow share cannot stall the UI
+void checkDrawingSize( GIT_FILE_SIDES& aSides )
+{
+    if( aSides.kind == KICAD_DIFF::DOC_KIND::SCH || aSides.kind == KICAD_DIFF::DOC_KIND::PCB )
+    {
+        aSides.tooLargeToPreview =
+                KIGIT::DrawingTooLargeToPreview( aSides.before, aSides.after, aSides.kind == KICAD_DIFF::DOC_KIND::SCH,
+                                                 aSides.beforeRoot, aSides.afterRoot );
+    }
 }
 
 
@@ -102,6 +120,8 @@ GIT_FILE_DIFF_AREA::GIT_FILE_DIFF_AREA( wxWindow* aParent, EDA_BASE_FRAME* aFram
         m_afterLabel( nullptr ),
         m_beforeCanvas( nullptr ),
         m_afterCanvas( nullptr ),
+        m_beforeAbsent( nullptr ),
+        m_afterAbsent( nullptr ),
         m_textDiff( nullptr ),
         m_legend( nullptr )
 {
@@ -153,6 +173,7 @@ GIT_FILE_DIFF_AREA::~GIT_FILE_DIFF_AREA()
 
 void GIT_FILE_DIFF_AREA::Clear()
 {
+    ++m_shown;
     m_query.Cancel();
     destroyCanvases();
 }
@@ -161,7 +182,7 @@ void GIT_FILE_DIFF_AREA::Clear()
 void GIT_FILE_DIFF_AREA::ShowFile( const std::shared_ptr<KIGIT_COMMON>& aSession, const MATERIALIZE& aMaterialize,
                                    const wxString& aBeforeLabel, const wxString& aAfterLabel )
 {
-    showNote( _( "Loading comparison..." ) );
+    ShowNote( _( "Loading comparison..." ) );
 
     auto result = std::make_shared<FILE_DIFF_RESULT>();
     result->sides.error = _( "Could not compare this file." );
@@ -181,21 +202,13 @@ void GIT_FILE_DIFF_AREA::ShowFile( const std::shared_ptr<KIGIT_COMMON>& aSession
                 if( !aMaterialize( aCommon, *result->workspace, result->sides ) )
                     return;
 
-                if( result->sides.kind == KICAD_DIFF::DOC_KIND::UNKNOWN )
+                if( result->sides.kind == KICAD_DIFF::DOC_KIND::UNKNOWN
+                    && !diffTextSides( result->sides, result->textLines ) )
                 {
-                    std::string before = readAll( result->sides.before );
-                    std::string after = readAll( result->sides.after );
-
-                    if( KIGIT::TextLooksBinary( before ) || KIGIT::TextLooksBinary( after ) )
-                    {
-                        result->sides.error = _( "This is not a plain text file, so there is no comparison to show." );
-                        return;
-                    }
-
-                    result->textLines =
-                            KIGIT::BuildTextDiff( KIGIT::SplitTextLines( before ), KIGIT::SplitTextLines( after ) );
+                    return;
                 }
 
+                checkDrawingSize( result->sides );
                 result->ready = true;
             },
             [this, result, aSession, aBeforeLabel, aAfterLabel]()
@@ -205,7 +218,7 @@ void GIT_FILE_DIFF_AREA::ShowFile( const std::shared_ptr<KIGIT_COMMON>& aSession
 
                 if( !result->ready )
                 {
-                    showNote( result->sides.error );
+                    ShowNote( result->sides.error );
                     return;
                 }
 
@@ -215,10 +228,74 @@ void GIT_FILE_DIFF_AREA::ShowFile( const std::shared_ptr<KIGIT_COMMON>& aSession
 }
 
 
-void GIT_FILE_DIFF_AREA::showNote( const wxString& aNote )
+void GIT_FILE_DIFF_AREA::ShowSides( const GIT_FILE_SIDES& aSides, const wxString& aBeforeLabel,
+                                    const wxString& aAfterLabel, std::shared_ptr<void> aFiles,
+                                    std::function<void()> aShown )
 {
+    // A git comparison still loading must not replace these sides when it lands
+    m_query.Cancel();
+
+    const unsigned shown = ++m_shown;
+
+    GIT_FILE_SIDES                     sides = aSides;
+    std::vector<KIGIT::TEXT_DIFF_LINE> textLines;
+
+    if( sides.error.IsEmpty() && sides.kind == KICAD_DIFF::DOC_KIND::UNKNOWN )
+    {
+        if( tooLargeToDiffHere( sides.before ) || tooLargeToDiffHere( sides.after ) )
+            sides.error = _( "This file is too large to preview." );
+        else
+            diffTextSides( sides, textLines );
+    }
+
+    const bool drawing = sides.kind == KICAD_DIFF::DOC_KIND::SCH || sides.kind == KICAD_DIFF::DOC_KIND::PCB;
+
+    if( !sides.error.IsEmpty() || !drawing )
+    {
+        if( sides.error.IsEmpty() )
+            showDiff( sides, textLines, aBeforeLabel, aAfterLabel );
+        else
+            ShowNote( sides.error );
+
+        if( aShown )
+            aShown();
+
+        return;
+    }
+
+    auto checked = std::make_shared<GIT_FILE_SIDES>( sides );
+
+    m_sizeCheck.Start(
+            "Preview size check",
+            [checked, aFiles]( const KIGIT_COMMON::CANCEL_TOKEN& )
+            {
+                // A failed check is doubt, and the completion must still run to show it
+                try
+                {
+                    checkDrawingSize( *checked );
+                }
+                catch( const std::exception& )
+                {
+                    checked->tooLargeToPreview = true;
+                }
+            },
+            // Holds the files until they are drawn, as the worker may drop its copy first
+            [this, checked, shown, aBeforeLabel, aAfterLabel, aShown, aFiles]()
+            {
+                if( shown == m_shown )
+                    showDiff( *checked, {}, aBeforeLabel, aAfterLabel );
+
+                if( aShown )
+                    aShown();
+            } );
+}
+
+
+void GIT_FILE_DIFF_AREA::ShowNote( const wxString& aNote )
+{
+    ++m_shown;
     destroyCanvases();
-    m_note->SetLabel( aNote );
+    m_note->SetLabelText( aNote );
     m_note->Show();
     m_canvasSplitter->Hide();
     GetSizer()->Show( m_legend, false );
@@ -232,12 +309,25 @@ void GIT_FILE_DIFF_AREA::showDiff( const GIT_FILE_SIDES& aSides, const std::vect
 {
     bool shown = true;
 
+    const bool drawing = aSides.kind == KICAD_DIFF::DOC_KIND::SCH || aSides.kind == KICAD_DIFF::DOC_KIND::PCB;
+
     if( aSides.kind == KICAD_DIFF::DOC_KIND::UNKNOWN )
+    {
         showTextDiff( aTextLines );
-    else if( aSides.kind == KICAD_DIFF::DOC_KIND::SCH || aSides.kind == KICAD_DIFF::DOC_KIND::PCB )
+    }
+    else if( drawing && aSides.tooLargeToPreview )
+    {
+        ShowNote( _( "This drawing is too large to preview. Double click the file to open its comparison." ) );
+        shown = false;
+    }
+    else if( drawing )
+    {
         shown = showDrawingDiff( aSides.kind, aSides.before, aSides.after, aBeforeLabel, aAfterLabel );
+    }
     else
-        showNote( _( "Double click the file to open its comparison." ) );
+    {
+        ShowNote( _( "Double click the file to open its comparison." ) );
+    }
 
     if( shown )
         Layout();
@@ -272,7 +362,7 @@ bool GIT_FILE_DIFF_AREA::showDrawingDiff( KICAD_DIFF::DOC_KIND aKind, const wxSt
 
     if( !m_diffContext )
     {
-        showNote( reporter.HasMessage() ? reporter.GetMessages() : _( "Could not compare this file." ) );
+        ShowNote( reporter.HasMessage() ? reporter.GetMessages() : _( "Could not compare this file." ) );
         return false;
     }
 
@@ -280,17 +370,33 @@ bool GIT_FILE_DIFF_AREA::showDrawingDiff( KICAD_DIFF::DOC_KIND aKind, const wxSt
     KICAD_DIFF::DIFF_SCENE       scene = KICAD_DIFF::BuildScene( diff, theme );
     scene.docKind = aKind;
 
+    KICAD_DIFF::CHANGE_BOX_LOOKUP olderBox = [this]( const KIID_PATH& aChange ) -> std::optional<BOX2I>
+    {
+        return aChange.empty() ? std::nullopt : m_beforeCanvas->ContextItemBBox( aChange.back() );
+    };
+
     // Both sides open on the same change. The user pans from there and the other side follows.
-    std::optional<BOX2I> focus = firstChangeBox( scene, aKind );
+    std::optional<BOX2I> focus = KICAD_DIFF::SideBySideFocusBox( scene, olderBox );
     m_beforeCanvas->SetFocusBox( focus );
     m_afterCanvas->SetFocusBox( focus );
 
-    KICAD_DIFF::SIDE_BY_SIDE_SCENES sides = KICAD_DIFF::SplitSceneBySide( scene );
+    KICAD_DIFF::SIDE_BY_SIDE_SCENES sides = KICAD_DIFF::SplitSceneBySide( scene, olderBox );
 
-    m_beforeLabel->SetLabel( aBeforeLabel );
-    m_afterLabel->SetLabel( aAfterLabel );
+    m_beforeLabel->SetLabelText( aBeforeLabel );
+    m_afterLabel->SetLabelText( aAfterLabel );
     m_beforeCanvas->SetScene( std::move( sides.reference ) );
     m_afterCanvas->SetScene( std::move( sides.comparison ) );
+
+    // A side with no file has nothing for its canvas to frame, which then never paints
+    auto showSide = []( WIDGET_DIFF_CANVAS* aCanvas, wxStaticText* aAbsent, bool aPresent )
+    {
+        aCanvas->Show( aPresent );
+        aAbsent->Show( !aPresent );
+        aCanvas->GetParent()->Layout();
+    };
+
+    showSide( m_beforeCanvas, m_beforeAbsent, !aBefore.IsEmpty() );
+    showSide( m_afterCanvas, m_afterAbsent, !aAfter.IsEmpty() );
 
     m_note->Hide();
     m_textDiff->Hide();
@@ -314,22 +420,25 @@ void GIT_FILE_DIFF_AREA::ensureCanvases()
             backend = frame->GetCanvas()->GetBackend();
     }
 
-    auto makeSide = [&]( wxStaticText** aLabel, WIDGET_DIFF_CANVAS** aCanvas )
+    auto makeSide = [&]( wxStaticText** aLabel, WIDGET_DIFF_CANVAS** aCanvas, wxStaticText** aAbsent )
     {
         wxPanel*    side = new wxPanel( m_canvasSplitter );
         wxBoxSizer* sizer = new wxBoxSizer( wxVERTICAL );
 
         *aLabel = new wxStaticText( side, wxID_ANY, wxEmptyString );
         *aCanvas = new WIDGET_DIFF_CANVAS( side, backend );
+        *aAbsent = new wxStaticText( side, wxID_ANY, _( "The file is not in this version." ) );
+        ( *aAbsent )->Hide();
 
         sizer->Add( *aLabel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 4 );
         sizer->Add( *aCanvas, 1, wxEXPAND );
+        sizer->Add( *aAbsent, 0, wxALIGN_CENTER_HORIZONTAL | wxALL, 8 );
         side->SetSizer( sizer );
         return side;
     };
 
-    wxPanel* before = makeSide( &m_beforeLabel, &m_beforeCanvas );
-    wxPanel* after = makeSide( &m_afterLabel, &m_afterCanvas );
+    wxPanel* before = makeSide( &m_beforeLabel, &m_beforeCanvas, &m_beforeAbsent );
+    wxPanel* after = makeSide( &m_afterLabel, &m_afterCanvas, &m_afterAbsent );
 
     m_canvasSplitter->SplitVertically( before, after );
 
@@ -359,6 +468,8 @@ void GIT_FILE_DIFF_AREA::destroyCanvases()
     m_afterCanvas = nullptr;
     m_beforeLabel = nullptr;
     m_afterLabel = nullptr;
+    m_beforeAbsent = nullptr;
+    m_afterAbsent = nullptr;
 }
 
 

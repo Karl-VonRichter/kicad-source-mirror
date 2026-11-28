@@ -181,6 +181,9 @@ void SYMBOL_EDIT_FRAME::activateSymbolTab( SYMBOL_EDITOR_TAB_CONTEXT* aContext )
     m_unit = aContext->GetUnit();
     m_bodyStyle = aContext->GetBodyStyle();
 
+    refreshTeamPart( true );
+    updateInfoBar();
+
     // Install the new screen before SetScreen, whose ResetTools would otherwise deref the freed one.
     m_toolManager->SetEnvironment( aContext->GetScreen(), GetCanvas()->GetView(), GetCanvas()->GetViewControls(),
                                    GetSettings(), this );
@@ -620,6 +623,36 @@ bool SYMBOL_EDIT_FRAME::promptToSaveInactiveInstanceTabs()
     activateSymbolTab( originalActive );
 
     return true;
+}
+
+
+bool SYMBOL_EDIT_FRAME::saveSchematicInstanceTabs()
+{
+    std::vector<SYMBOL_EDITOR_TAB_CONTEXT*> dirty;
+
+    for( const std::unique_ptr<SYMBOL_EDITOR_TAB_CONTEXT>& ctx : m_tabContexts )
+    {
+        if( ctx->IsFromSchematic() && ctx->IsModified() )
+            dirty.push_back( ctx.get() );
+    }
+
+    if( dirty.empty() )
+        return true;
+
+    SYMBOL_EDITOR_TAB_CONTEXT* originalActive = m_activeTab;
+    bool                       retv = true;
+
+    for( SYMBOL_EDITOR_TAB_CONTEXT* ctx : dirty )
+    {
+        activateSymbolTab( ctx );
+
+        if( !saveCurrentSymbol() )
+            retv = false;
+    }
+
+    activateSymbolTab( originalActive );
+
+    return retv;
 }
 
 

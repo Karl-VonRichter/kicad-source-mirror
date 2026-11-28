@@ -278,6 +278,10 @@ void SCH_IO_KICAD_SEXPR::loadHierarchy( const SCH_SHEET_PATH& aParentSheetPath, 
             {
                 loadFile( fileName.GetFullPath(), aSheet );
             }
+            catch( const IO_CANCELLED& )
+            {
+                throw;
+            }
             catch( const IO_ERROR& ioe )
             {
                 // If there is a problem loading the root sheet, there is no recovery.
@@ -1998,10 +2002,40 @@ void SCH_IO_KICAD_SEXPR::cacheLib( const wxString& aLibraryFileName,
         // a spectacular episode in memory management:
         delete m_cache;
         m_cache = new SCH_IO_KICAD_SEXPR_LIB_CACHE( aLibraryFileName );
+        m_cache->m_loadCancelled = &m_loadCancelled;
 
         if( !isBuffering( aProperties ) || ( isNewCache && m_cache->isLibraryPathValid() ) )
         {
-            m_cache->Load();
+            // Only for this load, since the reporter may not live as long as the cache
+            m_cache->m_progressReporter = m_progressReporter;
+
+            try
+            {
+                m_cache->Load();
+            }
+            catch( const IO_CANCELLED& )
+            {
+                delete m_cache;
+                m_cache = nullptr;
+                throw;
+            }
+            catch( const IO_ERROR& )
+            {
+                // A cancelled load holds part of the library, so the next load must read it again
+                if( m_loadCancelled.load() )
+                {
+                    delete m_cache;
+                    m_cache = nullptr;
+                }
+                else
+                {
+                    m_cache->m_progressReporter = nullptr;
+                }
+
+                throw;
+            }
+
+            m_cache->m_progressReporter = nullptr;
             m_cache->m_modHash = oldModifyHash + 1;
         }
     }

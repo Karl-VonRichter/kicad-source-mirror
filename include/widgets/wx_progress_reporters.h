@@ -80,17 +80,35 @@ public:
 
     void SetIndeterminate( bool aIndeterminate ) override { m_indeterminate.store( aIndeterminate ); }
 
+    /**
+     * Show each new phase at once, past the throttle, so a short phase's message is never skipped. Off by
+     * default, as a caller that advances a phase per item would refresh on every one.
+     */
+    void SetRefreshOnPhaseChange( bool aRefresh ) { m_refreshOnPhaseChange = aRefresh; }
+
+    /**
+     * Show @p aMessage and ignore the text of Report() until UnpinMessage(), so a caller can name a step better than
+     * the code it calls. Progress values still flow.
+     */
+    void PinMessage( const wxString& aMessage );
+    void UnpinMessage();
+
+    void Report( const wxString& aMessage ) override;
+
     ///< Gate expensive dialog work while always allowing the final tick.
-    static bool shouldRefresh( int aProgress, int aMaxProgress, int aPhase, int aNumPhases,
-                               THROTTLE& aThrottle )
+    static bool shouldRefresh( int aProgress, int aMaxProgress, int aPhase, int aNumPhases, int aShownPhase,
+                               bool aRefreshOnPhaseChange, THROTTLE& aThrottle )
     {
         bool finalTick = aMaxProgress > 0 && aProgress >= aMaxProgress && aPhase + 1 >= aNumPhases;
 
-        return finalTick || aThrottle.Ready();
+        return finalTick || ( aRefreshOnPhaseChange && aPhase != aShownPhase ) || aThrottle.Ready();
     }
 
 protected:
     bool updateUI() override;
+
+    ///< Event categories served after each refresh.
+    virtual long drainCategories() const { return wxEVT_CATEGORY_TIMER; }
 
 private:
     wxAppProgressIndicator m_appProgressIndicator;
@@ -100,6 +118,9 @@ private:
     THROTTLE               m_updateThrottle;
     std::atomic_bool       m_lastUpdateResult;
     std::atomic_bool       m_indeterminate;
+    std::atomic_int        m_shownPhase;
+    bool                   m_refreshOnPhaseChange = false;
+    bool                   m_messagePinned = false; ///< Guarded by m_mutex
 };
 
 

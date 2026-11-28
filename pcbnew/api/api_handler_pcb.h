@@ -25,11 +25,13 @@
 #include <api/pcb_context.h>
 #include <api/board/board_jobs.pb.h>
 #include <api/board/board_tasks.pb.h>
+#include <api/common/commands/annotation_commands.pb.h>
 #include <api/common/tasks.pb.h>
-#include <api/common/commands/cross_probe_commands.pb.h>
+#include <api/internal/cross_probe_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/common/commands/variant_commands.pb.h>
 #include <api/common/commands/library_commands.pb.h>
+#include <kiway.h>
 #include <properties/property_mgr.h>
 
 using namespace kiapi::board::jobs;
@@ -54,6 +56,12 @@ class API_HANDLER_PCB : public API_HANDLER_BOARD
 public:
     API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame );
     API_HANDLER_PCB( std::shared_ptr<PCB_CONTEXT> aContext, PCB_EDIT_FRAME* aFrame = nullptr );
+
+    bool HandleInternalApiRequest( const std::string& aRequest, std::string& aResponse ) override;
+
+protected:
+    virtual bool processApiRequest( KIWAY::FACE_T aFace, const std::string& aRequest,
+                                    std::string& aResponse );
 
 private:
     typedef std::map<std::string, PROPERTY_BASE*> PROTO_PROPERTY_MAP;
@@ -126,6 +134,10 @@ private:
 
     HANDLER_RESULT<ImportNetlistResponse> handleImportNetlist(
             const HANDLER_CONTEXT<ImportNetlist>& aCtx );
+
+    HANDLER_RESULT<kiapi::common::commands::ForwardAnnotationResponse>
+    handleUpdateBoardFromSchematic(
+            const HANDLER_CONTEXT<kiapi::common::commands::UpdateBoardFromSchematic>& aCtx );
 
     HANDLER_RESULT<ImportSpecctraSessionResponse> handleImportSpecctraSession(
             const HANDLER_CONTEXT<ImportSpecctraSession>& aCtx );
@@ -219,14 +231,14 @@ private:
     HANDLER_RESULT<types::RunJobResponse> handleRunBoardJobExportStats(
             const HANDLER_CONTEXT<RunBoardJobExportStats>& aCtx );
 
-    HANDLER_RESULT<commands::CrossProbeAnnounceResponse> handleCrossProbeAnnounce(
-            const HANDLER_CONTEXT<commands::CrossProbeAnnounce>& aCtx );
+    HANDLER_RESULT<kiapi::internal::CrossProbeAnnounceResponse> handleCrossProbeAnnounce(
+            const HANDLER_CONTEXT<kiapi::internal::CrossProbeAnnounce>& aCtx );
 
-    HANDLER_RESULT<commands::SyncSelectionResponse> handleSyncSelection(
-            const HANDLER_CONTEXT<commands::SyncSelection>& aCtx );
+    HANDLER_RESULT<kiapi::internal::SyncSelectionResponse> handleSyncSelection(
+            const HANDLER_CONTEXT<kiapi::internal::SyncSelection>& aCtx );
 
-    HANDLER_RESULT<commands::HighlightNetsResponse> handleHighlightNets(
-            const HANDLER_CONTEXT<commands::HighlightNets>& aCtx );
+    HANDLER_RESULT<kiapi::internal::HighlightNetsResponse> handleHighlightNets(
+            const HANDLER_CONTEXT<kiapi::internal::HighlightNets>& aCtx );
 
 protected:
     kiapi::common::types::DocumentType thisDocumentType() const override

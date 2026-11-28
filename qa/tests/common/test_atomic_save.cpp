@@ -219,6 +219,32 @@ BOOST_AUTO_TEST_CASE( AtomicWriteFile_OverwritePreservesOriginalOnFailure )
 }
 
 
+// The commit check sees the new bytes already written aside, and a refusal leaves the target as it was
+BOOST_AUTO_TEST_CASE( AtomicWriteFile_CommitCheckRunsJustBeforeRename )
+{
+    KI_TEST::SCOPED_TEMP_DIR tempDir( wxT( "kicad-atomicsave-commitcheck" ) );
+    const wxString           target = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "target" );
+    const std::string        original = "saved meanwhile\n";
+    const std::string        payload = "replacement\n";
+    unsigned                 temps = 0;
+
+    writeFileContents( target, original );
+
+    wxString err;
+    bool     ok = KIPLATFORM::IO::AtomicWriteFile( target, payload.data(), payload.size(), &err,
+                                                   [&]()
+                                                   {
+                                                   temps = countSiblingTemps( target );
+                                                   return false;
+                                               } );
+
+    BOOST_CHECK( !ok );
+    BOOST_CHECK_EQUAL( temps, 1u );
+    BOOST_CHECK_EQUAL( KI_TEST::LoadStringData( target ), original );
+    BOOST_CHECK_EQUAL( countSiblingTemps( target ), 0u );
+}
+
+
 BOOST_AUTO_TEST_CASE( PrettifiedFormatter_ExplicitFinishThrowsOnCommitFailure )
 {
     // Target path is a pre-existing directory so rename() fails with EISDIR during commit.
@@ -546,5 +572,60 @@ BOOST_AUTO_TEST_CASE( AtomicWriteFile_SavesWhenPermissionsCannotBeCopied )
 
 #endif // _WIN32
 
+
+// A stale temp at the next candidate names must be skipped, or the save keeps its tail
+BOOST_AUTO_TEST_CASE( AtomicWriteFile_SkipsStaleSiblingTemps )
+{
+    KI_TEST::SCOPED_TEMP_DIR tempDir( wxT( "kicad-atomicsave-stale" ) );
+    const wxString           target = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "target" );
+    const std::string        stale = "stale bytes from an interrupted save\n";
+    const std::string        payload = "short\n";
+
+    // The counter is process wide, so the names after this one are those the save tries next
+    const wxString probe = KIPLATFORM::IO::MakeSiblingTempPath( target );
+    unsigned long  counter = 0;
+    BOOST_REQUIRE( probe.AfterLast( '-' ).ToULong( &counter ) );
+
+    auto staleTemp = [&]( unsigned long aOffset )
+    {
+        return probe.BeforeLast( '-' ) + wxString::Format( wxT( "-%lu" ), counter + aOffset );
+    };
+
+    for( unsigned long i = 1; i <= 4; ++i )
+        writeFileContents( staleTemp( i ), stale );
+
+    wxString err;
+    BOOST_REQUIRE_MESSAGE( KIPLATFORM::IO::AtomicWriteFile( target, payload.data(), payload.size(), &err ), err );
+    BOOST_CHECK_EQUAL( KI_TEST::LoadStringData( target ), payload );
+
+    for( unsigned long i = 1; i <= 4; ++i )
+        BOOST_CHECK_EQUAL( KI_TEST::LoadStringData( staleTemp( i ) ), stale );
+}
+
+#ifndef _WIN32
+
+// The no-link fallback of RenameNoReplace copies through this, so a target made meanwhile must survive
+BOOST_AUTO_TEST_CASE( CopyToNewFile_LeavesAnExistingTargetAlone )
+{
+    KI_TEST::SCOPED_TEMP_DIR tempDir( wxT( "kicad-atomicsave-copynew" ) );
+    const wxString           source = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "source" );
+    const wxString           target = tempDir.PathStr() + wxFileName::GetPathSeparator() + wxT( "target" );
+    bool                     exists = false;
+
+    writeFileContents( source, "ours" );
+    writeFileContents( target, "theirs" );
+
+    BOOST_CHECK( !KIPLATFORM::IO::CopyToNewFile( source, target, &exists ) );
+    BOOST_CHECK( exists );
+    BOOST_CHECK_EQUAL( KI_TEST::LoadStringData( target ), "theirs" );
+
+    BOOST_REQUIRE( wxRemoveFile( target ) );
+    BOOST_CHECK( KIPLATFORM::IO::CopyToNewFile( source, target, &exists ) );
+    BOOST_CHECK( !exists );
+    BOOST_CHECK_EQUAL( KI_TEST::LoadStringData( target ), "ours" );
+    BOOST_CHECK_EQUAL( KI_TEST::LoadStringData( source ), "ours" );
+}
+
+#endif // _WIN32
 
 BOOST_AUTO_TEST_SUITE_END()

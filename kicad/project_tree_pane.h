@@ -26,9 +26,11 @@
 #ifndef TREEPRJ_FRAME_H
 #define TREEPRJ_FRAME_H
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <future>
@@ -41,9 +43,13 @@
 #include <dialogs/git/git_status_entries.h>
 #include <git/kicad_git_common.h>
 #include <git/kigit_failure.h>
+#include <mdw/client/mdw_client_types.h>
+#include <mdw/client/mdw_op.h>
+#include <mdw/mdw_claim_text.h>
 #include "tree_file_type.h"
 
 
+class MDW_SOURCE;
 class KICAD_MANAGER_FRAME;
 class KIGIT_QUERY;
 class PROJECT_TREE_ITEM;
@@ -84,6 +90,9 @@ public:
      */
     void WaitForGitOperations();
 
+    /// The type the tree gives aPath by its extension, UNKNOWN for one it does not list
+    static TREE_FILE_TYPE FileType( const wxString& aPath );
+
 protected:
     static wxString GetFileExt( TREE_FILE_TYPE type );
 
@@ -117,6 +126,12 @@ private:
      * Called on a right click on an item
      */
     void onRight( wxTreeEvent& Event );
+
+    /// Resolve the selected file's workspace item, then show the context menu, waiting at most a moment
+    void resolveContextMenu();
+    void onMenuLocateTimeout( wxTimerEvent& aEvent );
+
+    void openResolvedMenu();
 
     void showContextMenu();
 
@@ -184,6 +199,12 @@ private:
      */
     void onGitSwitchBranch( wxCommandEvent& event );
     void switchGitBranch( std::shared_ptr<KIGIT_COMMON> aCommon, const wxString& aBranchName, bool aCreate );
+
+    void onShowInWorkspace( wxCommandEvent& aEvent );
+    void onWorkspaceEditing( wxCommandEvent& aEvent );
+
+    /// The source that owns m_menuItem, or null
+    std::shared_ptr<MDW_SOURCE> menuItemSource() const;
 
     /**
      * Add the selected files to, or take them out of, the project's ignored files
@@ -327,6 +348,19 @@ private:
     std::vector<GIT_IGNORE_TARGET> m_gitMenuIgnoreTargets;
     std::weak_ptr<KIGIT_COMMON>    m_gitMenuSession;
 
+    /// The workspace item of m_menuItemPath, resolved before the context menu opens; empty when not
+    /// managed or not resolved in time.
+    MDW_OP       m_menuItemOp;
+    wxTimer      m_menuLocateWait;
+    wxString     m_menuItemPath;
+    MDW_ITEM_REF m_menuItem;
+
+    /// The claim actions the open context menu offers on m_menuItem, read from the session's lock tracker
+    std::vector<MDW_CLAIM_ACTION> m_menuClaimActions;
+
+    /// Counts right-clicks, so a menu queued for an earlier one does not open
+    unsigned m_menuGeneration = 0;
+
     /// Owns the branch-switch preflight and suppresses callbacks when the project closes.
     std::unique_ptr<KIGIT_QUERY> m_branchQuery;
 
@@ -334,7 +368,7 @@ private:
     std::unordered_map<wxString, wxTreeItemId>       m_gitTreeCache;
     std::mutex                                       m_gitStatusMutex;
     std::map<wxTreeItemId, KIGIT_COMMON::GIT_STATUS> m_gitStatusIcons;
-    bool                                             m_gitIconsInitialized;
+    std::atomic<bool>                                m_gitIconsInitialized;
 
     /// Raw status of every file in the last pass, so a change with no tree item still reaches the panels
     std::map<wxString, unsigned int> m_gitLastStatus;

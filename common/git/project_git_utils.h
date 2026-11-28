@@ -53,12 +53,12 @@ public:
     // Windows only
     static int AllowLongPaths( git_repository* aRepo );
 
-    // Gives a handle core.longpaths from a separate config file, leaving the repository's own config alone.
+    // Gives a handle core.longpaths from a level above its own config, leaving that config alone.
     // Windows only
     static int AttachLongPaths( git_repository* aRepo );
 
-    // The file AttachLongPaths keeps its setting in
-    static wxString LongPathsConfigPath();
+    // Adds the read-only level AttachLongPaths uses, which libgit2 never picks for a write
+    static int AddLongPathsLevel( git_repository* aRepo );
 
     /**
      * Create a new branch based on HEAD.
@@ -119,6 +119,14 @@ public:
      */
     static wxString ComputeSymlinkPreservingWorkDir( const wxString& aUserProjectPath,
                                                      const wxString& aCanonicalWorkDir );
+
+    /**
+     * The working folder of the repository holding aProjectDir, keeping the symlinks of aProjectDir, found on disk
+     * whether or not the project has the repository attached.
+     *
+     * @return The folder, or empty when no repository with a working folder holds aProjectDir.
+     */
+    static wxString RepositoryWorkingFolder( const wxString& aProjectDir );
 
     /**
      * Test whether an absolute file path lives inside the current project directory.

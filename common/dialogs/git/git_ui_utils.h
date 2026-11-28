@@ -20,14 +20,16 @@
 #ifndef GIT_UI_UTILS_H
 #define GIT_UI_UTILS_H
 
-#include <mutex>
 #include <git/kigit_action_lock.h>
+
 #include <vector>
 
 class KIGIT_COMMON;
 struct KIGIT_BRANCH_INFO;
 class WX_SPLITTER_WINDOW;
 class wxButton;
+class wxDataViewColumn;
+class wxDataViewCtrl;
 class wxDateTime;
 class wxListCtrl;
 class wxSplitterWindow;
@@ -60,8 +62,14 @@ wxString RelativeDate( const wxDateTime& aWhen, const wxDateTime& aNow );
 void UnsplitKeepingSash( wxSplitterWindow* aSplitter, wxWindow* aPane, int& aSashPos );
 
 /// Keep a split detail pane at the width its controls need, against both a narrow window and a
-/// dragged sash. Call while the pane is split and every control in it is shown.
+/// dragged sash. Call while the pane is split and every control in it is shown, and again after
+/// its controls change width.
 void KeepDetailWidth( WX_SPLITTER_WINDOW* aSplitter );
+
+/// Let aColumn take the width the other columns leave, never less than aMinWidth, and show its text as a tooltip.
+/// Call FitStretchedColumn after showing or hiding another column.
+void StretchColumn( wxDataViewCtrl* aCtrl, wxDataViewColumn* aColumn, int aMinWidth );
+void FitStretchedColumn( wxDataViewCtrl* aCtrl, wxDataViewColumn* aColumn, int aMinWidth );
 
 /// Paint a button's text the diff's red, for one that throws something away.
 void MarkDestructive( wxButton* aButton );
@@ -71,6 +79,12 @@ wxString SelectedText( wxListCtrl* aList, int aColumn );
 
 /// Check a name and email for recording commits. False leaves the reason in aError.
 bool ValidateIdentity( const wxString& aName, const wxString& aEmail, wxString& aError );
+
+/**
+ * Whether aPath, or the private key beside it when it names a .pub, is a private key ssh can offer. False leaves
+ * the reason in aError and aDetails, and true sets aEncrypted when the key needs a passphrase.
+ */
+bool CheckSSHKey( wxString aPath, wxString& aError, wxString& aDetails, bool& aEncrypted );
 
 } // namespace KIGIT
 

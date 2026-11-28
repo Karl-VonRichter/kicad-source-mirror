@@ -135,6 +135,7 @@ std::vector<FILE_CHECKLIST_ENTRY> BuildGitChangeEntries( KIGIT_COMMON& aCommon, 
         relativePath.Replace( wxS( "\\" ), wxS( "/" ) );
 #endif
 
+        // Use the session prefix so a project opened through a symlink has the same paths
         if( KIGIT::PROJECT_GIT_UTILS::IsHiddenTransient( relativePath, *prefix, fileStatus.gitStatus,
                                                          fileStatus.isDirectory ) )
         {
@@ -707,15 +708,17 @@ std::vector<wxString> LibraryEditorsWithUnsavedChanges( KIWAY& aKiway )
 }
 
 
-std::vector<wxString> ChangedTrackedFilesOutsideProject( KIGIT_COMMON& aCommon, const wxString& aProjectPath )
+namespace
 {
-    std::vector<wxString> paths;
 
+/// Every tracked file with changes, as absolute paths; nullopt without a repository
+std::optional<std::vector<wxString>> changedTrackedFiles( KIGIT_COMMON& aCommon )
+{
     if( !aCommon.GetRepo() )
-        return paths;
+        return std::nullopt;
 
-    GIT_STATUS_HANDLER handler( &aCommon );
-    wxString           workDir = handler.GetWorkingDirectory();
+    GIT_STATUS_HANDLER    handler( &aCommon );
+    std::vector<wxString> paths;
 
     for( const auto& [path, fileStatus] : handler.GetFileStatus( wxEmptyString, /* changed only */ true ) )
     {
@@ -726,6 +729,21 @@ std::vector<wxString> ChangedTrackedFilesOutsideProject( KIGIT_COMMON& aCommon, 
             continue;
         }
 
+        paths.push_back( path );
+    }
+
+    return paths;
+}
+
+
+std::vector<wxString> outsideProject( KIGIT_COMMON& aCommon, const std::vector<wxString>& aChanged,
+                                      const wxString& aProjectPath )
+{
+    std::vector<wxString> paths;
+    wxString              workDir = GIT_STATUS_HANDLER( &aCommon ).GetWorkingDirectory();
+
+    for( const wxString& path : aChanged )
+    {
         if( KIGIT::PROJECT_GIT_UTILS::IsWithinProjectPath( path, aProjectPath ) )
             continue;
 
@@ -738,6 +756,16 @@ std::vector<wxString> ChangedTrackedFilesOutsideProject( KIGIT_COMMON& aCommon, 
     }
 
     return paths;
+}
+
+} // namespace
+
+
+std::vector<wxString> ChangedTrackedFilesOutsideProject( KIGIT_COMMON& aCommon, const wxString& aProjectPath )
+{
+    std::optional<std::vector<wxString>> changed = changedTrackedFiles( aCommon );
+
+    return changed ? outsideProject( aCommon, *changed, aProjectPath ) : std::vector<wxString>();
 }
 
 
@@ -753,7 +781,10 @@ GIT_WORKTREE_STATUS ReadGitWorktreeStatus( KIGIT_COMMON& aCommon, const wxString
 
     // A sibling project's tracked edits block the same repository-wide rewrite.
     if( status.hasTrackedChanges )
-        status.outsideProject = ChangedTrackedFilesOutsideProject( aCommon, aProjectPath );
+    {
+        if( std::optional<std::vector<wxString>> changed = changedTrackedFiles( aCommon ) )
+            status.outsideProject = outsideProject( aCommon, *changed, aProjectPath );
+    }
 
     return status;
 }
@@ -882,26 +913,34 @@ bool PrepareEditorsForGitOperation( EDA_BASE_FRAME* aFrame, GIT_EDITOR_PREP aPur
 
     if( answer == wxID_YES )
     {
-        for( const GIT_EDITOR* editor : dirty )
-        {
-            std::string payload;
-            aFrame->Kiway().ExpressMail( editor->frameType, editor->saveMail, payload );
-
-            if( payload != "success" )
-            {
-                DisplayErrorMessage( aFrame,
-                                     wxString::Format( _( "Could not save %s." ), wxGetTranslation( editor->label ) ) );
-                return false;
-            }
-        }
-
         // Include project changes from saving editors only when the user chose to save.
-        aFrame->GetSettingsManager()->SaveProject();
+        if( !SaveDocumentEditors( aFrame ) )
+            return false;
 
         if( aSavedEditors )
             *aSavedEditors = true;
     }
 
+    return true;
+}
+
+
+bool SaveDocumentEditors( EDA_BASE_FRAME* aFrame )
+{
+    for( const GIT_EDITOR* editor : dirtyEditors( aFrame->Kiway(), EDITOR_SCOPE::DOCUMENTS ) )
+    {
+        std::string payload;
+        aFrame->Kiway().ExpressMail( editor->frameType, editor->saveMail, payload );
+
+        if( payload != "success" )
+        {
+            DisplayErrorMessage( aFrame,
+                                 wxString::Format( _( "Could not save %s." ), wxGetTranslation( editor->label ) ) );
+            return false;
+        }
+    }
+
+    aFrame->GetSettingsManager()->SaveProject();
     return true;
 }
 
@@ -919,13 +958,12 @@ wxString GIT_DIFF_WORKSPACE::Materialize( git_repository* aRepo, const wxString&
         return wxEmptyString;
 
     const wxString sep = wxFileName::GetPathSeparator();
+    const wxString dir = Root() + sep + wxString::Format( wxS( "s%d" ), m_slot++ );
 
     // A schematic root sheet references its sub-sheet files by relative path, so check out the
     // whole tree and the sub-sheets come along. A board is self-contained, so write just the blob.
     if( aKind == KICAD_DIFF::DOC_KIND::SCH )
     {
-        wxString dir = Root() + sep + wxString::Format( wxS( "s%d" ), m_slot++ );
-
         if( !KIGIT::PROJECT_GIT_UTILS::WriteTreeToDir( aRepo, aRef, dir ) )
             return wxEmptyString;
 
@@ -934,7 +972,11 @@ wxString GIT_DIFF_WORKSPACE::Materialize( git_repository* aRepo, const wxString&
         return wxFileName::FileExists( path ) ? path : wxString( wxEmptyString );
     }
 
-    wxString path = Root() + sep + wxString::Format( wxS( "s%d_" ), m_slot++ ) + wxFileName( aRelPath ).GetFullName();
+    // A folder per slot keeps the repository name, which the comparison shows while it loads
+    if( !wxFileName::Mkdir( dir, 0700 ) )
+        return wxEmptyString;
+
+    wxString path = dir + sep + wxFileName( aRelPath ).GetFullName();
 
     if( !KIGIT::PROJECT_GIT_UTILS::WriteBlobToFile( aRepo, aRef, aRelPath, path ) )
         return wxEmptyString;
@@ -1129,7 +1171,7 @@ void ChangeGitIgnore( EDA_BASE_FRAME* aFrame, wxWindow* aParent, GIT_IGNORE_CHAN
 
     {
         // Only to explain the result, so a busy repository is not worth waiting for.
-        KIGIT::ACTION_LOCK lock = common->TryLockAction();
+        KIGIT::ACTION_LOCK lock = common->TryLockActionLocal();
 
         if( !lock.owns_lock() )
             return;
@@ -1164,6 +1206,24 @@ void ShowGitFileDiff( EDA_BASE_FRAME* aFrame, const wxString& aRelativePath )
 }
 
 
+// A materialized schematic sits at its repository path under the tree it was written into. A board is written
+// alone into a slot folder of the workspace
+static wxString treeRootOf( const GIT_DIFF_WORKSPACE& aWorkspace, const wxString& aPath, const wxString& aRelativePath,
+                            KICAD_DIFF::DOC_KIND aKind )
+{
+    if( aPath.IsEmpty() )
+        return wxEmptyString;
+
+    if( aKind != KICAD_DIFF::DOC_KIND::SCH )
+        return aWorkspace.Root();
+
+    if( !aPath.EndsWith( aRelativePath ) )
+        return wxEmptyString;
+
+    return aPath.Left( aPath.length() - aRelativePath.length() );
+}
+
+
 bool MaterializeWorkingFile( KIGIT_COMMON& aCommon, GIT_DIFF_WORKSPACE& aWorkspace, const wxString& aRelativePath,
                              GIT_FILE_SIDES& aSides )
 {
@@ -1176,12 +1236,16 @@ bool MaterializeWorkingFile( KIGIT_COMMON& aCommon, GIT_DIFF_WORKSPACE& aWorkspa
 
     GIT_STATUS_HANDLER handler( &aCommon );
     aSides.after = handler.GetWorkingDirectory() + aRelativePath;
+    aSides.afterRoot = handler.GetWorkingDirectory();
 
     // A new file has no committed version, so that side stays empty and shows as added.
     bool inHead = aCommon.IsPathInHead( aRelativePath );
 
     if( inHead )
+    {
         aSides.before = aWorkspace.Materialize( repo, wxT( "HEAD" ), aRelativePath, aSides.kind );
+        aSides.beforeRoot = treeRootOf( aWorkspace, aSides.before, aRelativePath, aSides.kind );
+    }
 
     if( inHead && aSides.before.IsEmpty() )
     {
@@ -1316,10 +1380,14 @@ bool MaterializeCommitFile( KIGIT_COMMON& aCommon, GIT_DIFF_WORKSPACE& aWorkspac
         {
             wxString parentPath = file.oldPath.IsEmpty() ? file.path : file.oldPath;
             aSides.before = aWorkspace.Materialize( repo, parentRef, parentPath, aSides.kind );
+            aSides.beforeRoot = treeRootOf( aWorkspace, aSides.before, parentPath, aSides.kind );
         }
 
         if( hasCommit )
+        {
             aSides.after = aWorkspace.Materialize( repo, aCommitHash, file.path, aSides.kind );
+            aSides.afterRoot = treeRootOf( aWorkspace, aSides.after, file.path, aSides.kind );
+        }
 
         if( ( hasParent && aSides.before.IsEmpty() ) || ( hasCommit && aSides.after.IsEmpty() ) )
         {
@@ -1336,6 +1404,7 @@ bool MaterializeCommitFile( KIGIT_COMMON& aCommon, GIT_DIFF_WORKSPACE& aWorkspac
     {
         aSides.kind = KICAD_DIFF::DocKindFromExtension( aRelativePath );
         aSides.after = aWorkspace.Materialize( repo, aCommitHash + wxT( "^3" ), aRelativePath, aSides.kind );
+        aSides.afterRoot = treeRootOf( aWorkspace, aSides.after, aRelativePath, aSides.kind );
 
         if( !aSides.after.IsEmpty() )
             return true;

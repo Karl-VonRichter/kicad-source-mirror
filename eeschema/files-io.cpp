@@ -40,6 +40,9 @@
 #include <libraries/symbol_library_adapter.h>
 #include <local_history.h>
 #include <lockfile.h>
+#include <mdw/client/mdw_client.h>
+#include <mdw/client/mdw_library_sources.h>
+#include <widgets/mdw_library_notice.h>
 #include <pgm_base.h>
 #include <core/profile.h>
 #include <project/project_file.h>
@@ -72,6 +75,7 @@
 #include <trace_helpers.h>
 #include <widgets/filedlg_import_non_kicad.h>
 #include <widgets/kistatusbar.h>
+#include <widgets/mdw_save_prompt.h>
 #include <widgets/wx_infobar.h>
 #include <wildcards_and_files_ext.h>
 #include <local_history.h>
@@ -245,6 +249,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         ClearRepeatItemsList();
         SetScreen( nullptr );
         m_toolManager->GetTool<SCH_INSPECTION_TOOL>()->Reset( TOOL_BASE::SUPERMODEL_RELOAD );
+        destroySymbolFieldsTable();
     }
 
     SetStatusText( wxEmptyString );
@@ -376,6 +381,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         pi->SetProgressReporter( &progressReporter );
 
         bool failedLoad = false;
+        bool cancelledLoad = false;
 
         try
         {
@@ -389,7 +395,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
                 if( !topLevelSheets.empty() )
                 {
-                    std::vector<SCH_SHEET*> loadedSheets;
+                    // Owned until every root has loaded, so one that throws does not leak the others
+                    std::vector<std::unique_ptr<SCH_SHEET>> loadedSheets;
 
                     // Load each top-level sheet
                     for( const TOP_LEVEL_SHEET_INFO& sheetInfo : topLevelSheets )
@@ -404,7 +411,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                             continue;
                         }
 
-                        SCH_SHEET* sheet = pi->LoadSchematicFile( sheetPath, newSchematic.get() );
+                        std::unique_ptr<SCH_SHEET> sheet( pi->LoadSchematicFile( sheetPath, newSchematic.get() ) );
 
                         if( sheet )
                         {
@@ -416,16 +423,24 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                             }
 
                             sheet->SetName( sheetInfo.name );
-                            loadedSheets.push_back( sheet );
 
                             wxLogTrace( tracePathsAndFiles, wxS( "Loaded top-level sheet '%s' (UUID %s) from %s" ),
                                         sheet->GetName(), sheet->m_Uuid.AsString(), sheetPath );
+
+                            loadedSheets.push_back( std::move( sheet ) );
                         }
                     }
 
                     if( !loadedSheets.empty() )
                     {
-                        newSchematic->SetTopLevelSheets( loadedSheets );
+                        std::vector<SCH_SHEET*> topSheets;
+
+                        topSheets.reserve( loadedSheets.size() );
+
+                        for( std::unique_ptr<SCH_SHEET>& sheet : loadedSheets )
+                            topSheets.push_back( sheet.release() );
+
+                        newSchematic->SetTopLevelSheets( topSheets );
                     }
                     else
                     {
@@ -480,6 +495,14 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
             failedLoad = true;
         }
+        catch( const IO_CANCELLED& )
+        {
+            newSchematic->CreateDefaultScreens();
+            progressReporter.Hide();
+
+            failedLoad = true;
+            cancelledLoad = true;
+        }
         catch( const IO_ERROR& ioe )
         {
             newSchematic->CreateDefaultScreens();
@@ -508,17 +531,18 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
         if( failedLoad )
         {
-            // Do not leave g_RootSheet == NULL because it is expected to be
-            // a valid sheet. Therefore create a dummy empty root sheet and screen.
-            CreateDefaultScreens();
-            m_toolManager->RunAction( ACTIONS::zoomFitScreen );
+            showEmptySchematic();
 
-            // Show any messages collected before the failure
-            if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
-                statusBar->AddWarningMessages( "load", loadReporter.GetMessages() );
+            // A cancel is the user's choice, so it reports no failure
+            if( !cancelledLoad )
+            {
+                // Show any messages collected before the failure
+                if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )
+                    statusBar->AddWarningMessages( "load", loadReporter.GetMessages() );
 
-            msg.Printf( _( "Failed to load '%s'." ), fullFileName );
-            SetMsgPanel( wxEmptyString, msg );
+                msg.Printf( _( "Failed to load '%s'." ), fullFileName );
+                SetMsgPanel( wxEmptyString, msg );
+            }
 
             return false;
         }
@@ -690,8 +714,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
                 if( dlg.ShowModal() == wxID_CANCEL )
                 {
-                    Schematic().Reset();
-                    CreateDefaultScreens();
+                    showEmptySchematic();
                     return false;
                 }
             }
@@ -849,8 +872,7 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                     RefreshNetNavigator();
             } );
 
-    wxCommandEvent changedEvt( EDA_EVT_SCHEMATIC_CHANGED );
-    ProcessEventLocally( changedEvt );
+    broadcastSchematicChanged();
 
     if( !differentProject )
     {
@@ -861,21 +883,8 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
         ProjectChanged();
     }
 
-    for( wxEvtHandler* listener : m_schematicChangeListeners )
-    {
-        wxCHECK2( listener, continue );
-
-        // Use the windows variant when handling event messages in case there is any special
-        // event handler pre and/or post processing specific to windows.
-        wxWindow* win = dynamic_cast<wxWindow*>( listener );
-
-        if( win )
-            win->HandleWindowEvent( e );
-        else
-            listener->SafelyProcessEvent( e );
-    }
-
     updateTitle();
+    UpdateWorkspacePill();
     m_toolManager->GetTool<SCH_NAVIGATE_TOOL>()->ResetHistory();
     Prj().GetProjectFile().AcknowledgeTopLevelSheetChange();
 
@@ -911,7 +920,48 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
     // A standalone editor has no project manager to attach the git session for it.
     RefreshGitCommitPane();
 
+    ShowTeamLibraryNotice( this, Prj() );
     return true;
+}
+
+
+void SCH_EDIT_FRAME::showEmptySchematic()
+{
+    // Do not leave g_RootSheet == NULL because it is expected to be
+    // a valid sheet. Therefore create a dummy empty root sheet and screen.
+    CreateDefaultScreens();
+
+    initScreenZoom();
+    SetSheetNumberAndCount();
+    SyncView();
+
+    // The navigator and the navigation history still hold paths into the freed hierarchy
+    UpdateHierarchyNavigator( false, true );
+    m_toolManager->GetTool<SCH_NAVIGATE_TOOL>()->ResetHistory();
+
+    broadcastSchematicChanged();
+    updateTitle();
+}
+
+
+void SCH_EDIT_FRAME::broadcastSchematicChanged()
+{
+    wxCommandEvent changedEvt( EDA_EVT_SCHEMATIC_CHANGED );
+    ProcessEventLocally( changedEvt );
+
+    for( wxEvtHandler* listener : m_schematicChangeListeners )
+    {
+        wxCHECK2( listener, continue );
+
+        // Use the windows variant when handling event messages in case there is any special
+        // event handler pre and/or post processing specific to windows.
+        wxWindow* win = dynamic_cast<wxWindow*>( listener );
+
+        if( win )
+            win->HandleWindowEvent( changedEvt );
+        else
+            listener->SafelyProcessEvent( changedEvt );
+    }
 }
 
 
@@ -973,6 +1023,14 @@ void SCH_EDIT_FRAME::OnImportProject()
 
     eeconfig()->m_System.show_import_issues = importOptions.GetShowIssues();
 
+    wxFileName fn = dlg.GetPath();
+
+    if( !fn.IsFileReadable() )
+    {
+        wxLogError( _( "Insufficient permissions to read file '%s'." ), fn.GetFullPath() );
+        return;
+    }
+
     // Don't leave dangling pointers to previously-opened document.
     m_toolManager->GetTool<SCH_SELECTION_TOOL>()->ClearSelection();
     ClearUndoRedoList();
@@ -986,19 +1044,15 @@ void SCH_EDIT_FRAME::OnImportProject()
         // Clear view before destroying schematic as repaints depend on schematic being valid
         SetScreen( nullptr );
 
+        // Tools must let go of the hierarchy before it is freed
+        m_toolManager->ResetTools( TOOL_BASE::SUPERMODEL_RELOAD );
+
+        releaseSchematic();
         Schematic().Reset();
 
         wxFileName projectFn( dlg.GetPath() );
         projectFn.SetExt( FILEEXT::ProjectFileExtension );
         GetSettingsManager()->LoadProject( projectFn.GetFullPath() );
-    }
-
-    wxFileName fn = dlg.GetPath();
-
-    if( !fn.IsFileReadable() )
-    {
-        wxLogError( _( "Insufficient permissions to read file '%s'." ), fn.GetFullPath() );
-        return;
     }
 
     SCH_IO_MGR::SCH_FILE_T pluginType = SCH_IO_MGR::SCH_FILE_T::SCH_FILE_UNKNOWN;
@@ -1401,6 +1455,20 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
             return false;
     }
 
+    // A workspace may refuse a sheet's state, so ask before the first write rather than leave a partial save
+    for( size_t i = 0; i < screens.GetCount(); i++ )
+    {
+        wxFileName sheetFn = filenameMap[screens.GetScreen( i )];
+
+        if( sheetFn.IsOk() )
+        {
+            sheetFn.SetExt( FILEEXT::KiCadSchematicFileExtension );
+
+            if( !MdwConfirmSave( this, GetInfoBar(), Prj(), Prj().AbsolutePath( sheetFn.GetFullPath() ) ) )
+                return false;
+        }
+    }
+
     screens.BuildClientSheetPathList();
 
     std::vector<wxString> savedSheetPaths;
@@ -1456,7 +1524,10 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         bool savedThisSheet = saveSchematicFile( screens.GetSheet( i ), tmpFn.GetFullPath(), saveCopy );
 
         if( savedThisSheet )
+        {
             savedSheetPaths.push_back( tmpFn.GetFullPath() );
+            MDW_CLIENT::Get().NoteSaved( Prj(), Prj().AbsolutePath( tmpFn.GetFullPath() ) );
+        }
 
         success &= savedThisSheet;
     }
@@ -1488,6 +1559,19 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
         // Do not save the virtual root sheet
         if( !sheet->IsVirtualRootSheet() )
             sheets.emplace_back( std::make_pair( sheet->m_Uuid, sheet->GetName() ) );
+    }
+
+    // The project records a team library source once its design uses one, and a first Save As creates the project
+    if( success && !saveCopy && ( !Prj().IsNullProject() || createNewProject )
+        && MDW_LIBRARY_SOURCES::TeamLibrariesEnabled() )
+    {
+        wxArrayString nicknames;
+        screens.GetLibNicknames( nicknames );
+
+        MDW_LIBRARY_SOURCES::Record( Prj().GetProjectFile().m_WorkspaceLibrarySources,
+                                     MDW_LIBRARY_SOURCES::RequirementsFor( { nicknames.begin(), nicknames.end() },
+                                                                           Pgm().GetLibraryManager(),
+                                                                           MDW_LIBRARY_TYPE::SYMBOL ) );
     }
 
     wxASSERT( filenameMap.count( Schematic().RootScreen() ) );
@@ -1762,23 +1846,7 @@ bool SCH_EDIT_FRAME::importFile( const wxString& aFileName, int aFileType,
                         RefreshNetNavigator();
                 } );
 
-        wxCommandEvent e( EDA_EVT_SCHEMATIC_CHANGED );
-        ProcessEventLocally( e );
-
-        for( wxEvtHandler* listener : m_schematicChangeListeners )
-        {
-            wxCHECK2( listener, continue );
-
-            // Use the windows variant when handling event messages in case there is any
-            // special event handler pre and/or post processing specific to windows.
-            wxWindow* win = dynamic_cast<wxWindow*>( listener );
-
-            if( win )
-                win->HandleWindowEvent( e );
-            else
-                listener->SafelyProcessEvent( e );
-        }
-
+        broadcastSchematicChanged();
         updateTitle();
 
         if( KISTATUSBAR* statusBar = dynamic_cast<KISTATUSBAR*>( GetStatusBar() ) )

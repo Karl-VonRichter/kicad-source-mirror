@@ -23,6 +23,7 @@
 #include <memory>
 #include <qa_utils/wx_utils/unit_test_utils.h>
 #include <qa_utils/env_var_utils.h>
+#include <qa_utils/scoped_global_lib_table.h>
 
 #include <mock_pgm_base.h>
 #include <pgm_base.h>
@@ -130,6 +131,8 @@ BOOST_AUTO_TEST_CASE( ProjectLibraryTable )
 // installation so that you can benchmark a typical load
 BOOST_AUTO_TEST_CASE( AsyncLoad )
 {
+    KI_TEST::SCOPED_GLOBAL_LIB_TABLE globalTable( LIBRARY_TABLE_TYPE::SYMBOL );
+
     LIBRARY_MANAGER manager;
     manager.LoadGlobalTables();
 
@@ -540,6 +543,10 @@ BOOST_AUTO_TEST_CASE( AsyncLoadSkipsDisabledRows )
     BOOST_CHECK_MESSAGE( !adapter->IsLibraryLoaded( "DeviceDisabled" ),
                          "Disabled library must not be contacted by AsyncLoad" );
 
+    // An editor asked for a part of the disabled library refuses it without contacting it either
+    BOOST_CHECK( !adapter->LoadEnabledLibrary( "DeviceDisabled" ) );
+    BOOST_CHECK( !adapter->IsLibraryLoaded( "DeviceDisabled" ) );
+
     // The dialog validates rows through CheckTableRow. A disabled row with an unreachable URI
     // must be left untouched rather than probed, so its stale error is cleared without a load.
     LIBRARY_TABLE_ROW validationRow = *rows[1];
@@ -593,6 +600,14 @@ BOOST_AUTO_TEST_CASE( UnloadedProjectRowShadowsLoadedGlobal )
     BOOST_CHECK_MESSAGE( !adapter->GetLibraryDescription( kDeviceLibNickname ).has_value(),
                          "GetLibraryDescription must not return the global library's "
                          "description for an unloaded project nickname" );
+
+    // An editor asked for a part of it loads the project library, not the shadowed global one
+    BOOST_CHECK( adapter->LoadEnabledLibrary( kDeviceLibNickname ) );
+    BOOST_CHECK( adapter->HasLibrary( kDeviceLibNickname ) );
+
+    // A Workspace Open checks the part against the library itself before raising the editor
+    BOOST_CHECK( adapter->SymbolExists( kDeviceLibNickname, wxS( "C" ) ) );
+    BOOST_CHECK( !adapter->SymbolExists( kDeviceLibNickname, wxS( "NoSuchSymbol" ) ) );
 }
 
 

@@ -78,6 +78,10 @@ KIGIT_COMMON::GIT_STATUS GIT_STATUS_HANDLER::ConvertStatus( unsigned int aGitSta
     {
         return KIGIT_COMMON::GIT_STATUS::GIT_STATUS_CONFLICTED;
     }
+    else if( aGitStatus & ( GIT_STATUS_INDEX_TYPECHANGE | GIT_STATUS_WT_TYPECHANGE ) )
+    {
+        return KIGIT_COMMON::GIT_STATUS::GIT_STATUS_MODIFIED;
+    }
     else
     {
         return KIGIT_COMMON::GIT_STATUS::GIT_STATUS_CURRENT;

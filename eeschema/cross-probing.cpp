@@ -21,7 +21,8 @@
 
 #include <wx/tokenzr.h>
 #include <api/api_utils.h>
-#include <api/common/commands/cross_probe_commands.pb.h>
+#include <api/api_sch_annotation.h>
+#include <api/internal/cross_probe_commands.pb.h>
 #include <api/cross_probe_client.h>
 #include <fmt.h>
 #include <kiface_base.h>
@@ -331,7 +332,7 @@ void SCH_EDIT_FRAME::HandleRemoteNetHighlight( const wxString& aNetName )
 
 void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems, bool aForce )
 {
-    kiapi::common::commands::SyncSelection sync;
+    kiapi::internal::SyncSelection sync;
 
     for( EDA_ITEM* item : aItems )
     {
@@ -340,7 +341,7 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
         case SCH_SYMBOL_T:
         {
             SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
-            kiapi::common::commands::SelectionSpec* spec = sync.add_items();
+            kiapi::internal::SelectionSpec* spec = sync.add_items();
             spec->mutable_footprint()->set_reference( symbol->GetCurrentSheetRef().ToUTF8() );
             break;
         }
@@ -352,7 +353,7 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
             KIID_PATH path = GetCurrentSheet().Path();
             path.push_back( item->m_Uuid );
 
-            kiapi::common::commands::SelectionSpec* spec = sync.add_items();
+            kiapi::internal::SelectionSpec* spec = sync.add_items();
             kiapi::common::PackSheetPath( *spec->mutable_sheet_path(), path );
             break;
         }
@@ -369,7 +370,7 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
 
             for( const wxString& pad : ExpandStackedPinNotation( effective ) )
             {
-                kiapi::common::commands::SelectionSpec* spec = sync.add_items();
+                kiapi::internal::SelectionSpec* spec = sync.add_items();
                 spec->mutable_pad()->set_reference( ref.ToUTF8() );
                 spec->mutable_pad()->set_number( pad.ToUTF8() );
             }
@@ -385,8 +386,8 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
     if( sync.items_size() == 0 )
         return;
 
-    sync.set_context( aForce ? commands::SyncSelectionContext::SSC_EXPLICIT
-                             : commands::SyncSelectionContext::SSC_IMPLICIT );
+    sync.set_context( aForce ? kiapi::internal::SyncSelectionContext::SSC_EXPLICIT
+                             : kiapi::internal::SyncSelectionContext::SSC_IMPLICIT );
 
     if( Kiface().IsSingle() )
     {
@@ -402,7 +403,7 @@ void SCH_EDIT_FRAME::SendSelectItemsToPcb( const std::vector<EDA_ITEM*>& aItems,
 }
 
 
-static void sendHighlightNets( SCH_EDIT_FRAME* aFrame, const kiapi::common::commands::HighlightNets& aMessage )
+static void sendHighlightNets( SCH_EDIT_FRAME* aFrame, const kiapi::internal::HighlightNets& aMessage )
 {
     if( Kiface().IsSingle() )
     {
@@ -420,7 +421,7 @@ static void sendHighlightNets( SCH_EDIT_FRAME* aFrame, const kiapi::common::comm
 
 void SCH_EDIT_FRAME::SendCrossProbeNetName( const wxString& aNetName )
 {
-    kiapi::common::commands::HighlightNets message;
+    kiapi::internal::HighlightNets message;
 
     message.add_net_name( aNetName.ToUTF8() );
     sendHighlightNets( this, message );
@@ -437,7 +438,7 @@ void SCH_EDIT_FRAME::SetCrossProbeConnection( const wxString& aName )
         return;
     }
 
-    kiapi::common::commands::HighlightNets message;
+    kiapi::internal::HighlightNets message;
 
     for( const wxString& name : names )
         message.add_net_name( name.ToUTF8() );
@@ -512,13 +513,9 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
 
         PrepareForNetlist();
 
-        NETLIST_EXPORTER_KICAD exporter( &Schematic(), &Kiway() );
-        STRING_FORMATTER formatter;
-
-        exporter.Format( &formatter, GNL_ALL | GNL_OPT_KICAD );
+        FormatSchematicNetlist( Schematic(), &Kiway(), payload );
 
         RefreshConnectivity( true );
-        payload = formatter.GetString();
         break;
     }
 
@@ -645,6 +642,10 @@ void SCH_EDIT_FRAME::KiwayMailIn( KIWAY_MAIL_EVENT& mail )
         if( SaveProject() )
             payload = "success";
 
+        break;
+
+    case MAIL_REVIEW_LIBRARY_UPDATES:
+        m_toolManager->PostAction( SCH_ACTIONS::updateSymbols );
         break;
 
     case MAIL_SCH_RELOAD:

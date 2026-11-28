@@ -28,6 +28,7 @@
 #include <deque>
 #include <set>
 #include <memory>
+#include <optional>
 #include <wx/arrstr.h>
 #include <sch_io/sch_io_mgr.h>
 #include <sch_screen.h>
@@ -46,6 +47,16 @@ enum class SYMBOL_NAME_FILTER
     ALL,
     ROOT_ONLY,
     DERIVED_ONLY
+};
+
+
+/// Whether a symbol a caller names can be opened, judged by the editor's buffers before the library file
+enum class SYMBOL_AVAILABILITY
+{
+    BUFFERED,           ///< A buffer holds it under that name, saved or not
+    RENAMED_OR_DELETED, ///< A buffer renamed or deleted it and the library is not saved yet
+    IN_LIBRARY,         ///< No buffer holds it and the library file has it
+    MISSING
 };
 
 
@@ -97,11 +108,21 @@ public:
 
     int GetHash() const { return m_hash; }
 
+    /// The LIBRARY_MANAGER::FileStamp() of the library's files the buffer holds, or 0 when unknown
+    void SetFileStamp( size_t aStamp ) { m_fileStamp = aStamp; }
+
     /// Return the working copy of a #LIB_SYMBOL root object with specified alias.
     LIB_SYMBOL* GetSymbol( const wxString& aAlias ) const;
 
     /// Buffer copies of a library's symbols, linking each derived copy to its buffered parent
     void BufferOriginals( std::vector<LIB_SYMBOL*> aOriginals );
+
+    /**
+     * Buffer a copy of \a aSymbol as read from the library, buffering its parent first when no buffer holds it.
+     *
+     * @throw IO_ERROR without buffering anything when a pending rename or delete took the parent's name.
+     */
+    LIB_SYMBOL* BufferLibrarySymbol( const LIB_SYMBOL& aSymbol );
 
     /// Create a new buffer to store a symbol. #LIB_BUFFER takes ownership of \a aCopy.
     bool CreateBuffer( std::unique_ptr<LIB_SYMBOL> aCopy, std::unique_ptr<SCH_SCREEN> aScreen, bool aNew = false );
@@ -163,6 +184,14 @@ public:
      */
     bool SaveAs( const wxString& aFileName, SCH_IO* aPlugin, bool aReplacesOwnFile );
 
+    /**
+     * Return the names of the symbols a save to aFileName, a library of type aFileType, would write over a change
+     * something else, such as a git pull, made to the file since the buffer read it. When the file changed, the
+     * save is run on a copy of it and compared with the file, since a save also rewrites symbols nobody edited.
+     * Every symbol that changed on disk is named when the copy cannot be saved.
+     */
+    std::vector<wxString> SymbolsChangedOnDisk( const wxString& aFileName, SCH_IO_MGR::SCH_FILE_T aFileType ) const;
+
     /// Save stored modifications using a plugin. aBuffer decides whether the changes
     /// should be cached or stored directly to the disk (for #SCH_IO_KICAD_LEGACY).
     bool SaveBuffer( SYMBOL_BUFFER& aSymbolBuf, const wxString& aFileName, SCH_IO* aPlugin,
@@ -170,6 +199,12 @@ public:
 
     /// Return a symbol buffer with #LIB_SYMBOL holding a symbolic alias.
     std::shared_ptr<SYMBOL_BUFFER> GetBuffer( const wxString& aAlias ) const;
+
+    /**
+     * BUFFERED when a buffer's working copy is named aName, otherwise RENAMED_OR_DELETED when a pending rename or
+     * delete took aName, otherwise std::nullopt for the library file to decide.
+     */
+    std::optional<SYMBOL_AVAILABILITY> Availability( const wxString& aName ) const;
 
     /// Return all buffered symbols.
     const std::deque<std::shared_ptr<SYMBOL_BUFFER>>& GetBuffers() const { return m_symbols; }
@@ -203,6 +238,9 @@ public:
     size_t GetDerivedSymbolNames( const wxString& aSymbolName, wxArrayString& aList ) const;
 
 private:
+    /// A copy of the buffer whose symbols link to each other as these do, to save without touching these
+    LIB_BUFFER clone() const;
+
     /**
      * Remove all symbols derived from \a aSymbolBuf from the library buffer.
      *
@@ -224,6 +262,7 @@ private:
     std::deque<std::shared_ptr<SYMBOL_BUFFER>> m_deleted;   ///< Buffer for deleted symbols until lib is saved
     const wxString                             m_libName;   ///< Buffered library name
     int                                        m_hash;
+    size_t                                     m_fileStamp = 0;
 };
 
 
@@ -249,6 +288,11 @@ public:
      * requested library does not exist.
      */
     int GetLibraryHash( const wxString& aLibrary ) const;
+
+    /**
+     * Return the hash of an unbuffered library at @a aUri, which changes when its files are written.
+     */
+    static int LibraryFileHash( const wxString& aLibrary, const wxString& aUri );
 
     /**
      * Return the array of library names.
@@ -299,9 +343,12 @@ public:
      */
     bool UpdateLibraryBuffer( const wxString& aLibrary );
 
-    /// Forget the buffers of libraries with no unsaved changes, except those in aKeep, so they are
-    /// read again from their files, and return those libraries' names
-    std::vector<wxString> DropUnmodifiedBuffers( const std::set<wxString>& aKeep = {} );
+    /// Return the names of the libraries that have a buffer
+    std::set<wxString> GetBufferedLibraries() const;
+
+    /// Forget the buffers of aLibraries that have no unsaved changes, so they are read again from their files,
+    /// and return those libraries' names
+    std::vector<wxString> DropUnmodifiedBuffers( const std::set<wxString>& aLibraries );
 
     /**
      * Remove the symbol from the symbol buffer.
@@ -343,6 +390,16 @@ public:
      */
     bool SymbolExists( const wxString& aSymbolName, const wxString& aLibrary ) const;
 
+    /// The buffer's verdict on aSymbolName, std::nullopt when no buffer of aLibrary decides it
+    std::optional<SYMBOL_AVAILABILITY> BufferAvailability( const wxString& aSymbolName,
+                                                           const wxString& aLibrary ) const;
+
+    /**
+     * Whether aSymbolName can be opened from aLibrary. The buffers answer first, so a name a pending rename or
+     * delete took is never read back from the file into a second buffer, which the save would then keep.
+     */
+    SYMBOL_AVAILABILITY SymbolAvailability( const wxString& aSymbolName, const wxString& aLibrary ) const;
+
     /**
      * Return true if the symbol name is already in use in the specified library.
      */
@@ -364,6 +421,11 @@ public:
      * Return true if library has unsaved modifications.
      */
     bool IsLibraryModified( const wxString& aLibrary ) const;
+
+    /**
+     * Return true if library has unsaved modifications other than those of symbol aSymbolName.
+     */
+    bool IsLibraryModifiedBesides( const wxString& aLibrary, const wxString& aSymbolName ) const;
 
     /**
      * Return true if symbol has unsaved modifications.
@@ -397,6 +459,10 @@ public:
     bool SaveLibrary( const wxString& aLibrary, const wxString& aFileName,
                       SCH_IO_MGR::SCH_FILE_T aFileType = SCH_IO_MGR::SCH_FILE_T::SCH_LEGACY,
                       bool aReplacesOwnFile = false );
+
+    /// LIB_BUFFER::SymbolsChangedOnDisk() for the buffer of aLibrary, read from aFileName with a plugin of aFileType
+    std::vector<wxString> SymbolsChangedOnDisk( const wxString& aLibrary, const wxString& aFileName,
+                                                SCH_IO_MGR::SCH_FILE_T aFileType ) const;
 
     /**
      * Revert unsaved changes for a symbol and clear its modified flag.

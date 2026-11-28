@@ -76,6 +76,7 @@ set( QA_EESCHEMA_SRCS
     sch_io/cadstar/test_issue26025_pin_renumber.cpp
     sch_io/cadstar/test_issue26030_net_label_split.cpp
     sch_io/cadstar/test_issue26031_wire_over_pin.cpp
+    sch_io/test_sch_io_cancel.cpp
     sch_io/kicad_sexpr/test_sch_io_kicad_sexpr_leak_cache.cpp
 
     erc/test_erc_annotation.cpp
@@ -113,6 +114,7 @@ set( QA_EESCHEMA_SRCS
     erc/test_erc_net_chain_pin_to_pin.cpp
     erc/test_erc_pin_context.cpp
     erc/test_erc_power_pin_marker_location.cpp
+    erc/test_erc_lib_part_not_released.cpp
     erc/test_erc_lib_symbol_mismatch.cpp
     erc/test_erc_lib_symbol_field_position.cpp
     erc/test_erc_footprint_filters.cpp
@@ -221,6 +223,9 @@ set( QA_EESCHEMA_SRCS
     test_bus_parsing.cpp
     test_sch_differ.cpp
     test_sch_merge_applier.cpp
+    test_mdw_placed_parts.cpp
+    test_mdw_workspace_row_item.cpp
+    test_sym_digest.cpp
     test_sym_lib_differ.cpp
     test_label_bus_connectivity.cpp
     test_label_bounding_box.cpp
@@ -238,6 +243,7 @@ set( QA_EESCHEMA_SRCS
     test_history_autosave_legacy.cpp
     test_sch_api_enums.cpp
     test_sch_api_handler.cpp
+    test_sch_api_annotation.cpp
     test_sch_api_hittest.cpp
     test_sch_api_proto.cpp
     test_sch_commit.cpp
@@ -284,6 +290,7 @@ set( QA_EESCHEMA_SRCS
     test_pin_stacked_layout.cpp
     test_pin_text_overlap.cpp
     test_pin_number_default_style_clearance.cpp
+    test_pin_number_display.cpp
     test_remote_symbol_download_security.cpp
     test_remote_symbol_import.cpp
     test_remote_symbol_load_from_payload.cpp

@@ -22,6 +22,8 @@
 
 #include <functional>
 #include <optional>
+#include <utility>
+#include <vector>
 #include <wx/event.h>
 #include <wx/infobar.h>
 #include <wx/timer.h>
@@ -76,6 +78,9 @@ wxDECLARE_EVENT( KIEVT_DISMISS_INFOBAR, wxCommandEvent );
 class WX_INFOBAR : public wxInfoBarGeneric
 {
 public:
+    /// A menu entry's label and the function to execute if it is chosen
+    using MENU_LINK_ITEM = std::pair<wxString, std::function<void()>>;
+
     /**
      * Construct an infobar.
      *
@@ -132,6 +137,14 @@ public:
      * @param aFn is the function to execute if the link is clicked
      */
     void AddLink( const wxString& aLinkText, const std::function<void( wxHyperlinkEvent& )>& aFn );
+
+    /**
+     * Add a link that opens a menu below it.  Link is added in the right-most position.
+     *
+     * @param aLinkText is the text to show, which gains a drop-down arrow
+     * @param aItems are the menu's entries, in order
+     */
+    void AddMenuLink( const wxString& aLinkText, const std::vector<MENU_LINK_ITEM>& aItems );
 
     /**
      * Add a button with the provided ID and text.
@@ -197,6 +210,13 @@ public:
     void Dismiss() override;
 
     /**
+     * Run aFn once, from the event loop, after the message shown now is dismissed. A message waiting for the
+     * infobar uses this to show itself once the infobar is free. Nothing runs if another message replaces the
+     * current one first or the infobar is destroyed.
+     */
+    void CallAfterDismiss( std::function<void()> aFn ) { m_afterDismiss.push_back( std::move( aFn ) ); }
+
+    /**
      * Send the infobar an event telling it to show a message.
      *
      * @param aMessage is the message to display
@@ -254,6 +274,11 @@ protected:
     void doSize();
 
     /**
+     * Replace the message's tooltip, which the platform keeps showing after the text it holds has gone.
+     */
+    void setMessageToolTip( const wxString& aText );
+
+    /**
      * Lay out every overlay infobar sharing this one's parent as a top-anchored stack, so that
      * two infobars on the same canvas do not cover each other.
      */
@@ -276,6 +301,7 @@ protected:
     wxStaticText* m_messageText;    ///< The message control, which wxInfoBarGeneric keeps private
 
     std::optional<std::function<void(void)>> m_callback;   ///< Optional callback made when closing infobar
+    std::vector<std::function<void()>>       m_afterDismiss; ///< Run once after the next dismissal
 
     DECLARE_EVENT_TABLE()
 };

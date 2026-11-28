@@ -23,7 +23,8 @@
 
 #include <api/api_handler_editor.h>
 #include <api/sch_context.h>
-#include <api/common/commands/cross_probe_commands.pb.h>
+#include <api/common/commands/annotation_commands.pb.h>
+#include <api/internal/cross_probe_commands.pb.h>
 #include <api/common/commands/editor_commands.pb.h>
 #include <api/common/commands/project_commands.pb.h>
 #include <api/common/commands/library_commands.pb.h>
@@ -34,6 +35,7 @@
 #include <api/schematic/schematic_jobs.pb.h>
 #include <api/schematic/schematic_tasks.pb.h>
 #include <kiid.h>
+#include <kiway.h>
 
 using namespace kiapi;
 using namespace kiapi::common;
@@ -52,7 +54,11 @@ public:
     API_HANDLER_SCH( SCH_EDIT_FRAME* aFrame );
     API_HANDLER_SCH( std::shared_ptr<SCH_CONTEXT> aContext, SCH_EDIT_FRAME* aFrame = nullptr );
 
+    bool HandleInternalApiRequest( const std::string& aRequest, std::string& aResponse ) override;
+
 protected:
+    virtual bool processApiRequest( KIWAY::FACE_T aFace, const std::string& aRequest, std::string& aResponse );
+
     std::optional<ApiResponseStatus> checkForHeadless( const std::string& aCommandName ) const;
 
     std::unique_ptr<COMMIT> createCommit() override;
@@ -181,14 +187,17 @@ private:
     HANDLER_RESULT<kiapi::schematic::commands::SchematicNetlistResponse>
     handleGetSchematicNetlist( const HANDLER_CONTEXT<kiapi::schematic::commands::GetSchematicNetlist>& aCtx );
 
-    HANDLER_RESULT<commands::CrossProbeAnnounceResponse>
-    handleCrossProbeAnnounce( const HANDLER_CONTEXT<commands::CrossProbeAnnounce>& aCtx );
+    HANDLER_RESULT<kiapi::common::commands::BackAnnotationResponse>
+    handleUpdateSchematicFromBoard( const HANDLER_CONTEXT<kiapi::common::commands::UpdateSchematicFromBoard>& aCtx );
 
-    HANDLER_RESULT<commands::SyncSelectionResponse>
-    handleSyncSelection( const HANDLER_CONTEXT<commands::SyncSelection>& aCtx );
+    HANDLER_RESULT<kiapi::internal::CrossProbeAnnounceResponse>
+    handleCrossProbeAnnounce( const HANDLER_CONTEXT<kiapi::internal::CrossProbeAnnounce>& aCtx );
 
-    HANDLER_RESULT<commands::HighlightNetsResponse> handleHighlightNets(
-            const HANDLER_CONTEXT<commands::HighlightNets>& aCtx );
+    HANDLER_RESULT<kiapi::internal::SyncSelectionResponse>
+    handleSyncSelection( const HANDLER_CONTEXT<kiapi::internal::SyncSelection>& aCtx );
+
+    HANDLER_RESULT<kiapi::internal::HighlightNetsResponse> handleHighlightNets(
+            const HANDLER_CONTEXT<kiapi::internal::HighlightNets>& aCtx );
 
     HANDLER_RESULT<commands::VariantsResponse> handleGetVariants( const HANDLER_CONTEXT<commands::GetVariants>& aCtx );
     HANDLER_RESULT<Empty> handleAddVariant( const HANDLER_CONTEXT<commands::AddVariant>& aCtx );
